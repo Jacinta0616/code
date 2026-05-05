@@ -189,6 +189,19 @@ export default function DynamicForm({ fields, answers, onChange }) {
             </div>
           )}
 
+          {/* 純日期 */}
+          {field.field_type === 'date' && (
+            <div>
+              <input
+                type="date"
+                value={answers[field.field_key] || ''}
+                onChange={e => handleChange(field.field_key, e.target.value)}
+                className="border-2 border-gray-300 rounded-xl px-4 py-4 text-kiosk-base focus:outline-none focus:border-blue-500"
+              />
+              <p className="text-sm text-gray-400 mt-2">請選擇日期（年 / 月 / 日）</p>
+            </div>
+          )}
+
           {/* 日期時間 — 拆成日期 + 時間兩個輸入框，確保 24 小時制 */}
           {field.field_type === 'datetime' && (() => {
             const raw = answers[field.field_key] || ''

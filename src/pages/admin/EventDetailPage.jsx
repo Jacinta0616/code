@@ -37,7 +37,7 @@ const FIELD_TYPE_LABEL = {
   time: 'time（時間）',
 }
 
-// ── 預設報名模板 ────────────────────────────────────────────
+// ── 回山報名模板 ─────────────────────────────────────────────
 const DEFAULT_TEMPLATE_FIELDS = [
   {
     field_key: 'identity',
@@ -59,17 +59,17 @@ const DEFAULT_TEMPLATE_FIELDS = [
     field_key: 'transport_up',
     field_label: '上山交通方式',
     field_type: 'radio',
-    options: ['搭精舍車', '搭學員的車', '自行開車', '其他'],
+    options: ['搭精舍車（大車）', '搭學員的車', '自行開車', '其他'],
     show_if: null,
     required: true,
   },
   {
     field_key: 'carpool_up',
-    field_label: '上山共乘者（學員姓名）',
+    field_label: '上山共乘者（司機學員姓名）',
     field_type: 'text',
     options: [],
     show_if: { transport_up: '搭學員的車' },
-    required: false,
+    required: true,
   },
   {
     field_key: 'plate_up',
@@ -91,17 +91,17 @@ const DEFAULT_TEMPLATE_FIELDS = [
     field_key: 'transport_down',
     field_label: '下山交通方式',
     field_type: 'radio',
-    options: ['搭精舍車', '搭學員的車', '自行開車', '其他'],
+    options: ['搭精舍車（大車）', '搭學員的車', '自行開車', '其他'],
     show_if: null,
     required: true,
   },
   {
     field_key: 'carpool_down',
-    field_label: '下山共乘者（學員姓名）',
+    field_label: '下山共乘者（司機學員姓名）',
     field_type: 'text',
     options: [],
     show_if: { transport_down: '搭學員的車' },
-    required: false,
+    required: true,
   },
   {
     field_key: 'plate_down',
@@ -120,6 +120,30 @@ const DEFAULT_TEMPLATE_FIELDS = [
     required: true,
   },
   {
+    field_key: 'stay_overnight',
+    field_label: '是否掛單',
+    field_type: 'boolean',
+    options: [],
+    show_if: null,
+    required: false,
+  },
+  {
+    field_key: 'stay_start',
+    field_label: '掛單開始日期',
+    field_type: 'date',
+    options: [],
+    show_if: { stay_overnight: true },
+    required: true,
+  },
+  {
+    field_key: 'stay_end',
+    field_label: '掛單結束日期',
+    field_type: 'date',
+    options: [],
+    show_if: { stay_overnight: true },
+    required: true,
+  },
+  {
     field_key: 'note_to_temple',
     field_label: '備註',
     field_type: 'text',
@@ -127,6 +151,42 @@ const DEFAULT_TEMPLATE_FIELDS = [
     show_if: null,
     required: false,
     placeholder: '欲同車者或其他需求',
+  },
+]
+
+// ── 精舍活動模板 ─────────────────────────────────────────────
+const TEMPLE_TEMPLATE_FIELDS = [
+  {
+    field_key: 'identity',
+    field_label: '身份別',
+    field_type: 'radio',
+    options: ['信眾', '義工'],
+    show_if: null,
+    required: true,
+  },
+  {
+    field_key: 'need_lunch',
+    field_label: '是否需要午齋',
+    field_type: 'boolean',
+    options: [],
+    show_if: null,
+    required: true,
+  },
+  {
+    field_key: 'need_parking',
+    field_label: '是否需要停車位',
+    field_type: 'boolean',
+    options: [],
+    show_if: null,
+    required: true,
+  },
+  {
+    field_key: 'volunteer_group',
+    field_label: '組別',
+    field_type: 'radio',
+    options: ['心燈', '照客', '行堂', '大寮', '機動', '環保', '交通', '司儀', '梵唄', '音響', '攝影'],
+    show_if: { identity: '義工' },
+    required: true,
   },
 ]
 
@@ -333,6 +393,9 @@ function formatFieldValue(field, val) {
   if (field.field_type === 'datetime' && typeof val === 'string' && val.includes('T')) {
     const [date, time] = val.split('T')
     return `${date.replaceAll('-', '/')} ${time.slice(0, 5)}`
+  }
+  if (field.field_type === 'date' && typeof val === 'string') {
+    return val.replaceAll('-', '/')
   }
   return val
 }
@@ -1443,14 +1506,27 @@ export default function EventDetailPage() {
               onClick={() => {
                 if (
                   fields.length === 0 ||
-                  window.confirm('套用預設模板後，目前設定的欄位將全部被取代。確定要繼續嗎？')
+                  window.confirm('套用「回山模板」後，目前設定的欄位將全部被取代。確定要繼續嗎？')
                 ) {
                   setFields(DEFAULT_TEMPLATE_FIELDS.map(f => ({ ...f })))
                 }
               }}
               className="border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg transition-colors"
             >
-              📋 套用預設模板
+              📋 套用回山模板
+            </button>
+            <button
+              onClick={() => {
+                if (
+                  fields.length === 0 ||
+                  window.confirm('套用「精舍模板」後，目前設定的欄位將全部被取代。確定要繼續嗎？')
+                ) {
+                  setFields(TEMPLE_TEMPLATE_FIELDS.map(f => ({ ...f })))
+                }
+              }}
+              className="border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg transition-colors"
+            >
+              🏯 套用精舍模板
             </button>
             <button
               onClick={handleSaveFields}

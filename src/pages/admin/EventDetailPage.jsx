@@ -115,41 +115,57 @@ function exportCSV(registrations, fields, event) {
 }
 
 // ── 即時看板統計 ──────────────────────────────────────────────
-const BIG_CAR_KEYS = ['大車', '精舍車']
+// 大車：包含「精舍」字樣（搭精舍車、精舍搭車 等）
+const BIG_CAR_KEYS = ['精舍']
 const SMALL_CAR_KEYS = ['自行開車', '搭學員']
 
+function classifyTransport(val) {
+  if (!val) return null
+  if (BIG_CAR_KEYS.some(k => val.includes(k))) return '大車'
+  if (SMALL_CAR_KEYS.some(k => val.includes(k))) return '小車'
+  return '其他'
+}
+
+// 統計單一交通欄位，回傳 { byIdentity, total }
+function computeTransportStats(regs, field, identityField) {
+  const byIdentity = {}
+  const total = { 大車: 0, 小車: 0, 其他: 0 }
+  if (!field) return { byIdentity, total }
+  for (const r of regs) {
+    const category = classifyTransport(r.answers?.[field.field_key])
+    if (!category) continue
+    total[category]++
+    if (identityField) {
+      const identity = r.answers?.[identityField.field_key] ?? '未填'
+      if (!byIdentity[identity]) byIdentity[identity] = { 大車: 0, 小車: 0, 其他: 0 }
+      byIdentity[identity][category]++
+    }
+  }
+  return { byIdentity, total }
+}
+
 function computeDashboardStats(regs, fields) {
-  // 身份別：動態讀 identity 欄位的所有選項值
   const identityField = fields.find(f => f.field_key === 'identity')
+  const upField   = fields.find(f => f.field_key === 'transport_up')
+                 ?? fields.find(f => f.field_key === 'transport')
+  const downField = fields.find(f => f.field_key === 'transport_down')
+
+  // 身份別總人數
   const identityCounts = {}
   if (identityField) {
     for (const r of regs) {
       const val = r.answers?.[identityField.field_key]
-      if (val !== undefined && val !== null && val !== '') {
-        identityCounts[val] = (identityCounts[val] || 0) + 1
-      }
-    }
-  }
-
-  // 上山交通：讀 transport_up（沒有則找 transport）
-  const transportField = fields.find(f => f.field_key === 'transport_up')
-                      ?? fields.find(f => f.field_key === 'transport')
-  let bigCar = 0, smallCar = 0, otherCar = 0
-  if (transportField) {
-    for (const r of regs) {
-      const val = r.answers?.[transportField.field_key]
-      if (!val) continue
-      if (BIG_CAR_KEYS.some(k => val.includes(k))) bigCar++
-      else if (SMALL_CAR_KEYS.some(k => val.includes(k))) smallCar++
-      else otherCar++
+      if (val) identityCounts[val] = (identityCounts[val] || 0) + 1
     }
   }
 
   return {
     identityField,
     identityCounts,
-    hasTransport: !!transportField,
-    bigCar, smallCar, otherCar,
+    upStats:   computeTransportStats(regs, upField,   identityField),
+    downStats: computeTransportStats(regs, downField, identityField),
+    hasUp:   !!upField,
+    hasDown: !!downField,
   }
 }
 
@@ -1236,54 +1252,79 @@ export default function EventDetailPage() {
 
           {/* 即時看板 */}
           {registrations.length > 0 && (() => {
-            const { identityField, identityCounts, hasTransport, bigCar, smallCar, otherCar } =
+            const { identityField, identityCounts, upStats, downStats, hasUp, hasDown } =
               computeDashboardStats(registrations, fields)
             const hasIdentity = !!identityField && Object.keys(identityCounts).length > 0
-            if (!hasIdentity && !hasTransport) return null
+            if (!hasIdentity && !hasUp && !hasDown) return null
 
-            // 依原始欄位選項順序排序（確保顯示順序穩定）
+            // 身份選項依後台定義排序
             const identityOptions = identityField?.options ?? []
-            const sortedIdentityEntries = [
-              ...identityOptions.filter(opt => identityCounts[opt] !== undefined).map(opt => [opt, identityCounts[opt]]),
-              ...Object.entries(identityCounts).filter(([k]) => !identityOptions.includes(k)),
+            const sortedIdentities = [
+              ...identityOptions.filter(o => identityCounts[o] !== undefined),
+              ...Object.keys(identityCounts).filter(k => !identityOptions.includes(k)),
             ]
 
-            return (
-              <div className="mb-4 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
-                <p className="text-[11px] font-semibold text-blue-400 mb-2 uppercase tracking-widest">即時看板</p>
-                <div className="flex flex-wrap gap-x-5 gap-y-2">
-                  {hasIdentity && (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs text-gray-500 shrink-0">身份</span>
-                      {sortedIdentityEntries.map(([val, count]) => (
-                        <span key={val} className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 text-sm shadow-sm">
-                          <span className="text-gray-600 text-xs">{val}</span>
-                          <span className="font-bold text-blue-700 text-base leading-none">{count}</span>
-                          <span className="text-xs text-gray-400">人</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {hasIdentity && hasTransport && (
-                    <div className="hidden sm:block w-px bg-blue-200 self-stretch" />
-                  )}
-                  {hasTransport && (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs text-gray-500 shrink-0">上山交通</span>
-                      {[
-                        { label: '大車', count: bigCar,  color: 'text-amber-600' },
-                        { label: '小車', count: smallCar, color: 'text-green-700' },
-                        ...(otherCar > 0 ? [{ label: '其他', count: otherCar, color: 'text-gray-500' }] : []),
-                      ].map(item => (
-                        <span key={item.label} className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 text-sm shadow-sm">
-                          <span className="text-gray-600 text-xs">{item.label}</span>
-                          <span className={`font-bold text-base leading-none ${item.color}`}>{item.count}</span>
-                          <span className="text-xs text-gray-400">人</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
+            // 渲染單一方向交通列（上山 or 下山）
+            function TransportRow({ label, stats }) {
+              const hasData = Object.values(stats.total).some(v => v > 0)
+              if (!hasData) return null
+
+              // 依身份排序的 byIdentity 列表
+              const identityKeys = sortedIdentities.filter(id => stats.byIdentity[id])
+              const useByIdentity = identityField && identityKeys.length > 0
+
+              return (
+                <div className="flex items-start gap-2 flex-wrap">
+                  <span className="text-xs text-gray-500 shrink-0 mt-1 w-14">{label}</span>
+                  <div className="flex flex-wrap gap-2">
+                    {useByIdentity ? (
+                      identityKeys.map(id => {
+                        const t = stats.byIdentity[id]
+                        const big = t.大車, small = t.小車, other = t.其他
+                        return (
+                          <div key={id} className="flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 shadow-sm">
+                            <span className="text-xs text-gray-500 mr-1">{id}</span>
+                            {big > 0   && <><span className="text-xs text-gray-500">大車</span><span className="text-xs font-bold text-amber-600 ml-0.5">{big}</span></>}
+                            {small > 0 && <><span className={`text-xs text-gray-500 ${big > 0 ? 'ml-1.5' : ''}`}>小車</span><span className="text-xs font-bold text-green-700 ml-0.5">{small}</span></>}
+                            {other > 0 && <><span className={`text-xs text-gray-500 ${(big+small) > 0 ? 'ml-1.5' : ''}`}>其他</span><span className="text-xs font-bold text-gray-500 ml-0.5">{other}</span></>}
+                          </div>
+                        )
+                      })
+                    ) : (
+                      <>
+                        {stats.total.大車 > 0 && <span className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 shadow-sm"><span className="text-xs text-gray-500">大車</span><span className="text-xs font-bold text-amber-600">{stats.total.大車}</span><span className="text-xs text-gray-400">人</span></span>}
+                        {stats.total.小車 > 0 && <span className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 shadow-sm"><span className="text-xs text-gray-500">小車</span><span className="text-xs font-bold text-green-700">{stats.total.小車}</span><span className="text-xs text-gray-400">人</span></span>}
+                        {stats.total.其他 > 0 && <span className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 shadow-sm"><span className="text-xs text-gray-500">其他</span><span className="text-xs font-bold text-gray-500">{stats.total.其他}</span><span className="text-xs text-gray-400">人</span></span>}
+                      </>
+                    )}
+                  </div>
                 </div>
+              )
+            }
+
+            return (
+              <div className="mb-4 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 space-y-2.5">
+                <p className="text-[11px] font-semibold text-blue-400 uppercase tracking-widest">即時看板</p>
+
+                {/* 身份別人數 */}
+                {hasIdentity && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500 shrink-0 w-14">身份</span>
+                    <div className="flex flex-wrap gap-2">
+                      {sortedIdentities.map(val => (
+                        <span key={val} className="inline-flex items-center gap-1 bg-white border border-blue-200 rounded-lg px-2.5 py-1 shadow-sm">
+                          <span className="text-xs text-gray-600">{val}</span>
+                          <span className="text-sm font-bold text-blue-700 leading-none">{identityCounts[val]}</span>
+                          <span className="text-xs text-gray-400">人</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 交通（上山 / 下山） */}
+                {hasUp   && <TransportRow label="上山" stats={upStats}   />}
+                {hasDown && <TransportRow label="下山" stats={downStats} />}
               </div>
             )
           })()}

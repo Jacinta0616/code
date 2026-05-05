@@ -17,6 +17,24 @@ const CHINESE_NUMS = ['一','二','三','四','五','六','七','八','九','十
 const chNum = n => CHINESE_NUMS[n - 1] ?? String(n)
 const genId = () => `tmp-${Math.random().toString(36).slice(2)}`
 
+// 取得顯示名稱（相容訪客）
+const getName    = r => r.students?.name ?? r.answers?.guest_name ?? '訪客'
+const getClasses = r => r.students?.student_classes ?? []
+
+// 取得備註欄（相容多種可能的 field_key）
+const getGuestNote = r =>
+  r.answers?.['備註'] ?? r.answers?.note ?? r.answers?.memo ?? r.answers?.beizhu ?? ''
+
+// 在學員報名清單中尋找備註提到的姓名
+function findGuestMatch(note, studentRegs) {
+  if (!note.trim()) return null
+  for (const r of studentRegs) {
+    const name = getName(r)
+    if (name && name.length >= 2 && note.includes(name)) return r
+  }
+  return null
+}
+
 // 判斷交通方式
 const isLargeCar      = ans => (ans?.transport_up ?? '').includes('精舍')
 const isSmallDriver   = ans => (ans?.transport_up ?? '').includes('自行開車')
@@ -35,7 +53,7 @@ function computeSmallGroups(regs) {
   const matchedGroups = []
 
   for (const driver of drivers) {
-    const driverName = driver.students?.name ?? ''
+    const driverName = getName(driver)
     const plate      = driver.answers?.plate_up ?? ''
     const matched    = passengers.filter(p => {
       if (usedIds.has(p.registration_id)) return false
@@ -99,11 +117,11 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
   const remaining = largePeople
     .filter(r => !assigned.has(r.registration_id))
     .sort((a, b) => {
-      const ac = a.students?.student_classes?.[0]?.class_name ?? ''
-      const bc = b.students?.student_classes?.[0]?.class_name ?? ''
+      const ac = getClasses(a)[0]?.class_name ?? ''
+      const bc = getClasses(b)[0]?.class_name ?? ''
       if (ac !== bc) return ac.localeCompare(bc, 'zh-TW')
-      const ag = a.students?.student_classes?.[0]?.group_name ?? ''
-      const bg = b.students?.student_classes?.[0]?.group_name ?? ''
+      const ag = getClasses(a)[0]?.group_name ?? ''
+      const bg = getClasses(b)[0]?.group_name ?? ''
       return ag.localeCompare(bg, 'zh-TW')
     })
 
@@ -116,20 +134,64 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     if (cars[ci].members.length >= cars[ci].seats) ci++
   }
 
+  // 處理訪客（student_id 為 null）
+  // 有備註且能配對到學員 → 排同車；否則留在未分配（顯示警示）
+  const guestLarge = largePeople.filter(r => !r.student_id && !assigned.has(r.registration_id))
+  const studentLarge = largePeople.filter(r => r.student_id)
+
+  for (const guest of guestLarge) {
+    const note    = getGuestNote(guest)
+    const matched = findGuestMatch(note, studentLarge)
+    if (matched) {
+      // 找到對應學員所在的車，排進去
+      const targetCar = cars.find(c => c.members.includes(matched.registration_id))
+      if (targetCar && targetCar.members.length < targetCar.seats) {
+        targetCar.members.push(guest.registration_id)
+        assigned.add(guest.registration_id)
+        continue
+      }
+    }
+    // 沒備註或找不到學員 → 不自動排，留在未分配警示區
+  }
+
   return cars
 }
 
 // ─── PersonRow 元件 ───────────────────────────────────────────
 
-function PersonRow({ reg, carIdx, cars, onMove, onToggleLeader }) {
-  const name     = reg.students?.name ?? '?'
-  const cls      = (reg.students?.student_classes ?? []).map(c => c.class_name).join('/')
+function PersonRow({ reg, carIdx, cars, onMove, onToggleLeader, guestInfo }) {
+  const name     = getName(reg)
+  const cls      = getClasses(reg).map(c => c.class_name).join('/')
   const isLeader = carIdx >= 0 && (cars[carIdx]?.leaders.includes(reg.registration_id) ?? false)
+  const isGuest  = !reg.student_id
 
   return (
-    <div className="flex items-center gap-2 px-4 py-2 hover:bg-amber-50 text-sm">
-      <span className="flex-1 font-medium truncate">{name}</span>
-      {cls && <span className="text-xs text-gray-400 shrink-0">{cls}</span>}
+    <div className={`flex items-center gap-2 px-4 py-2 text-sm ${isGuest ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-amber-50'}`}>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-medium truncate">{name}</span>
+          {isGuest && (
+            <span className="text-xs text-blue-500 bg-blue-100 rounded px-1 shrink-0">訪客</span>
+          )}
+          {/* 訪客備註配對狀態 */}
+          {isGuest && guestInfo?.matchedName && (
+            <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded px-1.5 shrink-0">
+              親友：{guestInfo.matchedName}
+            </span>
+          )}
+          {isGuest && !guestInfo?.matchedName && guestInfo?.note && (
+            <span className="text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded px-1.5 shrink-0" title={guestInfo.note}>
+              ⚠️ 備註：{guestInfo.note.slice(0, 10)}{guestInfo.note.length > 10 ? '…' : ''}
+            </span>
+          )}
+          {isGuest && !guestInfo?.matchedName && !guestInfo?.note && (
+            <span className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-1.5 shrink-0">
+              ❗ 未填親友
+            </span>
+          )}
+        </div>
+        {cls && <div className="text-xs text-gray-400 mt-0.5">{cls}</div>}
+      </div>
       {carIdx >= 0 && (
         <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer shrink-0 select-none">
           <input
@@ -185,7 +247,7 @@ export default function CarrangementDetailPage() {
   // orphanAssignments: { [registrationId]: groupKey(小車 key) }
   const [orphanAssignments, setOrphanAssignments] = useState({})
 
-  // ── 衍生資料 ──
+  // ── 衍生資料（含訪客）──
   const regMap      = useMemo(() => Object.fromEntries(regs.map(r => [r.registration_id, r])), [regs])
   const largePeople = useMemo(() => regs.filter(r => isLargeCar(r.answers)), [regs])
   const smallPeople = useMemo(() => regs.filter(r => isSmallCar(r.answers)), [regs])
@@ -211,6 +273,23 @@ export default function CarrangementDetailPage() {
 
   const assignedSet = useMemo(() => new Set(cars.flatMap(c => c.members)), [cars])
   const unassigned  = useMemo(() => largePeople.filter(r => !assignedSet.has(r.registration_id)), [largePeople, assignedSet])
+
+  // 訪客備註比對：{ regId: { note, matchedName } }
+  const guestInfoMap = useMemo(() => {
+    const map = {}
+    const studentRegs = largePeople.filter(r => r.student_id)
+    for (const guest of largePeople.filter(r => !r.student_id)) {
+      const note    = getGuestNote(guest)
+      const matched = findGuestMatch(note, studentRegs)
+      map[guest.registration_id] = { note, matchedName: matched ? getName(matched) : null }
+    }
+    return map
+  }, [largePeople])
+
+  // 需詢問的訪客（坐大車但找不到對應學員）
+  const guestsNeedFollowup = useMemo(() =>
+    largePeople.filter(r => !r.student_id && !guestInfoMap[r.registration_id]?.matchedName),
+  [largePeople, guestInfoMap])
 
   // ── 載入 ──
   useEffect(() => { load() }, [eventId])
@@ -294,8 +373,8 @@ export default function CarrangementDetailPage() {
       for (const regId of car.members) {
         const r = regMap[regId]
         if (!r) continue
-        const name     = r.students?.name ?? '?'
-        const classes  = r.students?.student_classes ?? []
+        const name     = getName(r)
+        const classes  = getClasses(r)
         const cls      = classes.map(c => c.class_name).join('/')
         const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
         const identity = r.answers?.identity ?? ''
@@ -307,8 +386,8 @@ export default function CarrangementDetailPage() {
     // 小車（有配對的群組）
     finalSmallGroups.forEach((g, idx) => {
       for (const r of g.allMembers) {
-        const name     = r.students?.name ?? '?'
-        const classes  = r.students?.student_classes ?? []
+        const name     = getName(r)
+        const classes  = getClasses(r)
         const cls      = classes.map(c => c.class_name).join('/')
         const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
         const identity = r.answers?.identity ?? ''
@@ -320,8 +399,8 @@ export default function CarrangementDetailPage() {
 
     // 未指定小車的孤兒
     for (const r of unassignedOrphans) {
-      const name     = r.students?.name ?? '?'
-      const classes  = r.students?.student_classes ?? []
+      const name     = getName(r)
+      const classes  = getClasses(r)
       const cls      = classes.map(c => c.class_name).join('/')
       const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
       const identity = r.answers?.identity ?? ''
@@ -431,10 +510,33 @@ export default function CarrangementDetailPage() {
           </div>
 
           {/* 提示 */}
-          <p className="text-xs text-gray-400 mb-4">
-            自動排車邏輯：優先將「關係連結」中的成員安排同車 → 再依班級分配剩餘座位。<br />
+          <p className="text-xs text-gray-400 mb-3">
+            自動排車邏輯：優先將「關係連結」中的成員安排同車 → 備註有寫親友姓名的訪客排同車 → 再依班級分配剩餘座位。<br />
             排好後可用每人右側的下拉選單手動調整車次，並勾選「領隊」標記當車領隊。
           </p>
+
+          {/* 需詢問訪客警示 */}
+          {guestsNeedFollowup.length > 0 && (
+            <div className="mb-4 bg-red-50 border border-red-300 rounded-xl px-4 py-3">
+              <div className="font-semibold text-red-700 text-sm mb-2">
+                ❗ 以下訪客坐大車，備註欄未填或找不到對應學員，排車前請先確認
+              </div>
+              <ul className="space-y-1">
+                {guestsNeedFollowup.map(r => {
+                  const info = guestInfoMap[r.registration_id]
+                  return (
+                    <li key={r.registration_id} className="flex items-center gap-2 text-sm text-red-800">
+                      <span className="font-medium">・{getName(r)}</span>
+                      {info?.note
+                        ? <span className="text-orange-600">備註：「{info.note}」（找不到對應學員）</span>
+                        : <span className="text-red-500">（未填備註，不知道跟誰同車）</span>
+                      }
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
 
           {/* 車輛卡片 */}
           {cars.length === 0 ? (
@@ -455,7 +557,7 @@ export default function CarrangementDetailPage() {
                     <span className="text-xs text-gray-400">{car.members.length} / {car.seats} 人</span>
                     {car.leaders.length > 0 && (
                       <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
-                        領隊：{car.leaders.map(lid => regMap[lid]?.students?.name ?? '?').join('、')}
+                        領隊：{car.leaders.map(lid => regMap[lid] ? getName(regMap[lid]) : '?').join('、')}
                       </span>
                     )}
                     {car.members.length >= car.seats && (
@@ -475,6 +577,7 @@ export default function CarrangementDetailPage() {
                           cars={cars}
                           onMove={movePerson}
                           onToggleLeader={toggleLeader}
+                          guestInfo={guestInfoMap[regId]}
                         />
                       ))
                     )}
@@ -500,6 +603,7 @@ export default function CarrangementDetailPage() {
                     cars={cars}
                     onMove={movePerson}
                     onToggleLeader={() => {}}
+                    guestInfo={guestInfoMap[r.registration_id]}
                   />
                 ))}
               </div>
@@ -534,7 +638,7 @@ export default function CarrangementDetailPage() {
                       const isOrphan  = orphans.some(o => o.registration_id === r.registration_id)
                       return (
                         <div key={r.registration_id} className={`flex items-center gap-2 px-4 py-2 text-sm ${isOrphan ? 'bg-orange-50' : ''}`}>
-                          <span className="flex-1 font-medium">{r.students?.name ?? '?'}</span>
+                          <span className="flex-1 font-medium">{getName(r)}</span>
                           {cls && <span className="text-xs text-gray-400">{cls}</span>}
                           <span className="text-xs text-gray-300">
                             {isDriver ? '（司機）' : carpoolNm ? `→ ${carpoolNm}` : ''}
@@ -573,7 +677,7 @@ export default function CarrangementDetailPage() {
                       const carpoolNm = r.answers?.carpool_up ?? ''
                       return (
                         <div key={r.registration_id} className="flex items-center gap-2 px-4 py-2 text-sm">
-                          <span className="flex-1 font-medium">{r.students?.name ?? '?'}</span>
+                          <span className="flex-1 font-medium">{getName(r)}</span>
                           {cls && <span className="text-xs text-gray-400">{cls}</span>}
                           {carpoolNm && <span className="text-xs text-gray-400">→ {carpoolNm}</span>}
                           <select
@@ -617,7 +721,7 @@ export default function CarrangementDetailPage() {
               const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
               return (
                 <option key={r.registration_id} value={r.registration_id}>
-                  {r.students?.name ?? '?'}{cls ? `　${cls}` : ''}
+                  {getName(r)}{cls ? `　${cls}` : ''}
                 </option>
               )
             })}

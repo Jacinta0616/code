@@ -669,7 +669,6 @@ export async function getEventRegistrationsDetail(eventId) {
       students ( name, student_classes(class_name, group_name) )
     `)
     .eq('event_id', eventId)
-    .not('student_id', 'is', null)
     .order('registered_at', { ascending: true })
 
   if (error) return { registrations: [], error: error.message }

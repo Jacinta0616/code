@@ -653,6 +653,137 @@ export async function getMyEvents(userId) {
   return { events: data || [], error: null }
 }
 
+// ─── 排車系統（後台）────────────────────────────────────────
+
+/**
+ * 取得活動所有報名紀錄（含學員班別，排除訪客），供排車用
+ */
+export async function getEventRegistrationsDetail(eventId) {
+  const { data, error } = await supabase
+    .from('registrations')
+    .select(`
+      registration_id,
+      student_id,
+      answers,
+      registered_at,
+      students ( name, student_classes(class_name, group_name) )
+    `)
+    .eq('event_id', eventId)
+    .not('student_id', 'is', null)
+    .order('registered_at', { ascending: true })
+
+  if (error) return { registrations: [], error: error.message }
+  return { registrations: data || [], error: null }
+}
+
+/**
+ * 取得活動的大車排班結果（含成員與領隊）
+ */
+export async function getCarArrangement(eventId) {
+  const { data, error } = await supabase
+    .from('car_assignments')
+    .select(`
+      car_id, car_name, seats, car_type, note, access_token, sort_order,
+      car_members ( registration_id ),
+      car_leaders ( registration_id )
+    `)
+    .eq('event_id', eventId)
+    .eq('car_type', 'large')
+    .order('sort_order', { ascending: true })
+
+  if (error) return { cars: [], error: error.message }
+  return { cars: data || [], error: null }
+}
+
+/**
+ * 儲存大車排班（全量取代）
+ */
+export async function saveCarArrangement(eventId, cars) {
+  // 刪除舊的大車資料（CASCADE 刪 car_members、car_leaders）
+  const { error: delErr } = await supabase
+    .from('car_assignments')
+    .delete()
+    .eq('event_id', eventId)
+    .eq('car_type', 'large')
+
+  if (delErr) return { success: false, error: delErr.message }
+  if (cars.length === 0) return { success: true, error: null }
+
+  // 插入車輛（含 sort_order 保序）
+  const carRows = cars.map((c, i) => ({
+    event_id: eventId,
+    car_name: c.car_name,
+    seats: c.seats,
+    car_type: 'large',
+    note: c.note || null,
+    sort_order: i,
+  }))
+
+  const { data: inserted, error: insErr } = await supabase
+    .from('car_assignments')
+    .insert(carRows)
+    .select('car_id, sort_order')
+
+  if (insErr) return { success: false, error: insErr.message }
+
+  // 依 sort_order 對應到原始 cars 陣列
+  const sortToCarId = Object.fromEntries(inserted.map(c => [c.sort_order, c.car_id]))
+
+  const memberRows = []
+  const leaderRows = []
+
+  for (let i = 0; i < cars.length; i++) {
+    const carId = sortToCarId[i]
+    for (const rid of cars[i].members) {
+      memberRows.push({ car_id: carId, registration_id: rid })
+    }
+    for (const rid of cars[i].leaders) {
+      leaderRows.push({ car_id: carId, registration_id: rid })
+    }
+  }
+
+  if (memberRows.length > 0) {
+    const { error: mErr } = await supabase.from('car_members').insert(memberRows)
+    if (mErr) return { success: false, error: mErr.message }
+  }
+
+  if (leaderRows.length > 0) {
+    const { error: lErr } = await supabase.from('car_leaders').insert(leaderRows)
+    if (lErr) return { success: false, error: lErr.message }
+  }
+
+  return { success: true, error: null }
+}
+
+/**
+ * 取得活動的總領隊
+ */
+export async function getHeadLeader(eventId) {
+  const { data, error } = await supabase
+    .from('head_leader')
+    .select('registration_id, access_token')
+    .eq('event_id', eventId)
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return { headLeader: null, error: null }
+    return { headLeader: null, error: error.message }
+  }
+  return { headLeader: data, error: null }
+}
+
+/**
+ * 設定（或更新）活動的總領隊
+ */
+export async function setHeadLeader(eventId, registrationId) {
+  const { error } = await supabase
+    .from('head_leader')
+    .upsert({ event_id: eventId, registration_id: registrationId }, { onConflict: 'event_id' })
+
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
 // ─── 關係連結（後台）────────────────────────────────────────
 
 /**

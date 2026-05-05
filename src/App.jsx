@@ -10,6 +10,8 @@ import CheckinPage from './pages/admin/CheckinPage'
 import StudentsPage from './pages/admin/StudentsPage'
 import TemplatesPage from './pages/admin/TemplatesPage'
 import RelationshipsPage from './pages/admin/RelationshipsPage'
+import CarrangementPage from './pages/admin/CarrangementPage'
+import CarrangementDetailPage from './pages/admin/CarrangementDetailPage'
 
 export default function App() {
   return (
@@ -41,6 +43,12 @@ export default function App() {
           } />
           <Route path="/admin/relationships" element={
             <ProtectedRoute adminOnly><RelationshipsPage /></ProtectedRoute>
+          } />
+          <Route path="/admin/carrangement" element={
+            <ProtectedRoute adminOnly><CarrangementPage /></ProtectedRoute>
+          } />
+          <Route path="/admin/carrangement/:eventId" element={
+            <ProtectedRoute adminOnly><CarrangementDetailPage /></ProtectedRoute>
           } />
         </Routes>
       </BrowserRouter>

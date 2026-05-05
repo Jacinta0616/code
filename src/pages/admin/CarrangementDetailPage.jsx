@@ -1,0 +1,533 @@
+import { useState, useEffect, useMemo } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import AdminLayout from '../../components/AdminLayout'
+import {
+  getAllEvents,
+  getEventRegistrationsDetail,
+  getRelationshipGroups,
+  getCarArrangement,
+  saveCarArrangement,
+  getHeadLeader,
+  setHeadLeader as saveHeadLeader,
+} from '../../lib/supabase'
+
+// ─── 常數與工具 ───────────────────────────────────────────────
+
+const CHINESE_NUMS = ['一','二','三','四','五','六','七','八','九','十','十一','十二','十三','十四','十五']
+const chNum = n => CHINESE_NUMS[n - 1] ?? String(n)
+const genId = () => `tmp-${Math.random().toString(36).slice(2)}`
+
+// 判斷交通方式
+const isLargeCar      = ans => (ans?.transport_up ?? '').includes('精舍')
+const isSmallDriver   = ans => (ans?.transport_up ?? '').includes('自行開車')
+const isSmallPassenger= ans => (ans?.transport_up ?? '').includes('搭學員')
+const isSmallCar      = ans => isSmallDriver(ans) || isSmallPassenger(ans)
+
+// ─── 小車配對（純運算，不存 DB）────────────────────────────────
+
+function computeSmallGroups(regs) {
+  const drivers    = regs.filter(r => isSmallDriver(r.answers))
+  const passengers = regs.filter(r => isSmallPassenger(r.answers))
+  const usedIds    = new Set()
+  const groups     = []
+
+  for (const driver of drivers) {
+    const driverName = driver.students?.name ?? ''
+    const plate      = driver.answers?.plate_up ?? ''
+    const matched    = passengers.filter(p => {
+      if (usedIds.has(p.registration_id)) return false
+      const cn = (p.answers?.carpool_up ?? '').trim()
+      if (!cn) return false
+      return driverName.includes(cn) || cn.includes(driverName)
+    })
+    matched.forEach(p => usedIds.add(p.registration_id))
+    groups.push({ key: driver.registration_id, driverName, plate, members: [driver, ...matched], isUnmatched: false })
+  }
+
+  // 剩餘找不到司機的乘客：依 carpool_up 分組
+  const orphans = passengers.filter(p => !usedIds.has(p.registration_id))
+  const orphanMap = {}
+  for (const p of orphans) {
+    const key = (p.answers?.carpool_up ?? '未知司機').trim()
+    if (!orphanMap[key]) orphanMap[key] = []
+    orphanMap[key].push(p)
+  }
+  for (const [key, members] of Object.entries(orphanMap)) {
+    groups.push({ key, driverName: key, plate: '', members, isUnmatched: true })
+  }
+
+  return groups
+}
+
+// ─── 自動排車演算法 ────────────────────────────────────────────
+
+function autoArrange(largePeople, carCount, seats, relGroups) {
+  const cars = Array.from({ length: carCount }, (_, i) => ({
+    tempId: genId(),
+    car_name: `第${chNum(i + 1)}車`,
+    seats: Number(seats),
+    members: [],
+    leaders: [],
+  }))
+
+  const assigned    = new Set()
+  const studentToId = Object.fromEntries(largePeople.map(r => [r.student_id, r.registration_id]))
+
+  // 關係群組中有 2 人以上搭大車的，視為需要安排在同車
+  const regGroups = relGroups
+    .map(rg => ({
+      name: rg.name,
+      ids: (rg.relationship_members ?? [])
+        .map(m => studentToId[m.student_id])
+        .filter(Boolean),
+    }))
+    .filter(rg => rg.ids.length >= 2)
+    .sort((a, b) => b.ids.length - a.ids.length)
+
+  const avail   = car => car.seats - car.members.length
+  const bestCar = size => {
+    const fits = cars.filter(c => avail(c) >= size)
+    if (fits.length > 0) return fits.reduce((a, b) => avail(a) <= avail(b) ? a : b) // 最接近剛好滿的
+    return cars.reduce((a, b) => avail(a) >= avail(b) ? a : b) // 剩餘最多座位的
+  }
+
+  // 優先安排關係群組
+  for (const rg of regGroups) {
+    const todo = rg.ids.filter(id => !assigned.has(id))
+    if (!todo.length) continue
+    const car = bestCar(todo.length)
+    for (const id of todo) {
+      if (car.members.length < car.seats) { car.members.push(id); assigned.add(id) }
+    }
+  }
+
+  // 剩餘依班級、組別排序後依序填入
+  const remaining = largePeople
+    .filter(r => !assigned.has(r.registration_id))
+    .sort((a, b) => {
+      const ac = a.students?.student_classes?.[0]?.class_name ?? ''
+      const bc = b.students?.student_classes?.[0]?.class_name ?? ''
+      if (ac !== bc) return ac.localeCompare(bc, 'zh-TW')
+      const ag = a.students?.student_classes?.[0]?.group_name ?? ''
+      const bg = b.students?.student_classes?.[0]?.group_name ?? ''
+      return ag.localeCompare(bg, 'zh-TW')
+    })
+
+  // 班級同學儘量塞同一台車（不先輪換車次）
+  let ci = 0
+  for (const p of remaining) {
+    while (ci < carCount && cars[ci].members.length >= cars[ci].seats) ci++
+    if (ci >= carCount) break
+    cars[ci].members.push(p.registration_id)
+    if (cars[ci].members.length >= cars[ci].seats) ci++
+  }
+
+  return cars
+}
+
+// ─── PersonRow 元件 ───────────────────────────────────────────
+
+function PersonRow({ reg, carIdx, cars, onMove, onToggleLeader }) {
+  const name     = reg.students?.name ?? '?'
+  const cls      = (reg.students?.student_classes ?? []).map(c => c.class_name).join('/')
+  const isLeader = carIdx >= 0 && (cars[carIdx]?.leaders.includes(reg.registration_id) ?? false)
+
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 hover:bg-amber-50 text-sm">
+      <span className="flex-1 font-medium truncate">{name}</span>
+      {cls && <span className="text-xs text-gray-400 shrink-0">{cls}</span>}
+      {carIdx >= 0 && (
+        <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer shrink-0 select-none">
+          <input
+            type="checkbox"
+            checked={isLeader}
+            onChange={() => onToggleLeader(carIdx, reg.registration_id)}
+            className="accent-amber-600"
+          />
+          領隊
+        </label>
+      )}
+      <select
+        value={carIdx >= 0 ? String(carIdx) : ''}
+        onChange={e => onMove(reg.registration_id, e.target.value === '' ? -1 : Number(e.target.value))}
+        className="text-xs border rounded px-1.5 py-0.5 bg-white shrink-0 focus:outline-none focus:ring-1 focus:ring-amber-400"
+      >
+        <option value="">未分配</option>
+        {cars.map((c, i) => (
+          <option key={c.tempId} value={String(i)}>{c.car_name}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+// ─── StatCard 元件 ────────────────────────────────────────────
+
+function StatCard({ label, value, color }) {
+  return (
+    <div className={`border rounded-xl p-4 ${color}`}>
+      <div className="text-3xl font-bold">{value}</div>
+      <div className="text-xs mt-1">{label}</div>
+    </div>
+  )
+}
+
+// ─── 主頁面 ───────────────────────────────────────────────────
+
+export default function CarrangementDetailPage() {
+  const { eventId } = useParams()
+  const navigate    = useNavigate()
+
+  const [loading, setLoading]               = useState(true)
+  const [event,   setEvent]                 = useState(null)
+  const [regs,    setRegs]                  = useState([])
+  const [relGroups, setRelGroups]           = useState([])
+  const [cars,    setCars]                  = useState([])
+  const [carCount, setCarCount]             = useState(2)
+  const [seatsPerCar, setSeatsPerCar]       = useState(20)
+  const [headLeaderRegId, setHeadLeaderRegId] = useState('')
+  const [saving,  setSaving]                = useState(false)
+  const [msg,     setMsg]                   = useState('')
+
+  // ── 衍生資料 ──
+  const regMap      = useMemo(() => Object.fromEntries(regs.map(r => [r.registration_id, r])), [regs])
+  const largePeople = useMemo(() => regs.filter(r => isLargeCar(r.answers)), [regs])
+  const smallPeople = useMemo(() => regs.filter(r => isSmallCar(r.answers)), [regs])
+  const smallGroups = useMemo(() => computeSmallGroups(smallPeople), [smallPeople])
+  const assignedSet = useMemo(() => new Set(cars.flatMap(c => c.members)), [cars])
+  const unassigned  = useMemo(() => largePeople.filter(r => !assignedSet.has(r.registration_id)), [largePeople, assignedSet])
+
+  // ── 載入 ──
+  useEffect(() => { load() }, [eventId])
+
+  async function load() {
+    setLoading(true)
+    const [{ events }, { registrations }, { groups }, { cars: savedCars }, { headLeader }] = await Promise.all([
+      getAllEvents(),
+      getEventRegistrationsDetail(eventId),
+      getRelationshipGroups(),
+      getCarArrangement(eventId),
+      getHeadLeader(eventId),
+    ])
+
+    setEvent(events.find(e => e.event_id === eventId) ?? null)
+    setRegs(registrations)
+    setRelGroups(groups)
+
+    if (savedCars.length > 0) {
+      const mapped = savedCars.map(c => ({
+        tempId:  c.car_id,
+        car_name: c.car_name,
+        seats:   c.seats,
+        members: (c.car_members ?? []).map(m => m.registration_id),
+        leaders: (c.car_leaders ?? []).map(l => l.registration_id),
+      }))
+      setCars(mapped)
+      setCarCount(mapped.length)
+      setSeatsPerCar(mapped[0]?.seats ?? 20)
+    }
+
+    if (headLeader) setHeadLeaderRegId(headLeader.registration_id ?? '')
+    setLoading(false)
+  }
+
+  // ── 操作 ──
+  function handleAutoArrange() {
+    if (largePeople.length === 0) { alert('此活動沒有搭精舍車的學員'); return }
+    if (cars.length > 0 && !window.confirm('自動排車會覆蓋現有排法，確定繼續？')) return
+    setCars(autoArrange(largePeople, Number(carCount), Number(seatsPerCar), relGroups))
+  }
+
+  function movePerson(regId, targetCarIdx) {
+    setCars(prev => prev.map((c, i) => {
+      const without = { ...c, members: c.members.filter(id => id !== regId), leaders: c.leaders.filter(id => id !== regId) }
+      if (i === targetCarIdx) return { ...without, members: [...without.members, regId] }
+      return without
+    }))
+  }
+
+  function toggleLeader(carIdx, regId) {
+    setCars(prev => prev.map((c, i) => {
+      if (i !== carIdx) return c
+      const has = c.leaders.includes(regId)
+      return { ...c, leaders: has ? c.leaders.filter(id => id !== regId) : [...c.leaders, regId] }
+    }))
+  }
+
+  function updateCarName(carIdx, name) {
+    setCars(prev => prev.map((c, i) => i === carIdx ? { ...c, car_name: name } : c))
+  }
+
+  async function handleSave() {
+    setSaving(true); setMsg('')
+    const [carRes, hlRes] = await Promise.all([
+      saveCarArrangement(eventId, cars),
+      headLeaderRegId
+        ? saveHeadLeader(eventId, headLeaderRegId)
+        : Promise.resolve({ success: true }),
+    ])
+    setSaving(false)
+    setMsg(carRes.success && hlRes.success ? '已儲存 ✓' : `儲存失敗：${carRes.error || hlRes.error}`)
+    setTimeout(() => setMsg(''), 4000)
+  }
+
+  function handleExport() {
+    const rows = [['車次', '姓名', '班級', '組別', '身份別', '是否領隊']]
+    for (const car of cars) {
+      for (const regId of car.members) {
+        const r = regMap[regId]
+        if (!r) continue
+        const name     = r.students?.name ?? '?'
+        const classes  = r.students?.student_classes ?? []
+        const cls      = classes.map(c => c.class_name).join('/')
+        const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
+        const identity = r.answers?.identity ?? ''
+        const isLeader = car.leaders.includes(regId) ? '是' : ''
+        rows.push([car.car_name, name, cls, grp, identity, isLeader])
+      }
+    }
+    const csv  = '﻿' + rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a'); a.href = url
+    a.download = `${event?.name ?? '活動'}_分車名單.csv`
+    a.click(); URL.revokeObjectURL(url)
+  }
+
+  // ── 渲染 ──
+  if (loading) return <AdminLayout><div className="text-center py-20 text-gray-400">載入中…</div></AdminLayout>
+
+  return (
+    <AdminLayout>
+      <div className="space-y-6 pb-24">
+
+        {/* 頁首 */}
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <button
+              onClick={() => navigate('/admin/carrangement')}
+              className="text-sm text-amber-700 hover:underline mb-1 block"
+            >
+              ← 返回活動列表
+            </button>
+            <h1 className="text-xl font-bold text-gray-800">{event?.name ?? '載入中…'}</h1>
+            <p className="text-sm text-gray-400">排車系統</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {msg && (
+              <span className={`text-sm font-medium ${msg.includes('失敗') ? 'text-red-500' : 'text-green-600'}`}>
+                {msg}
+              </span>
+            )}
+            <button
+              onClick={handleExport}
+              disabled={cars.length === 0}
+              className="px-3 py-2 text-sm border rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-40"
+            >
+              📥 匯出分車名單
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 transition-colors font-medium"
+            >
+              {saving ? '儲存中…' : '儲存'}
+            </button>
+          </div>
+        </div>
+
+        {/* 統計卡片 */}
+        <div className="grid grid-cols-3 gap-3">
+          <StatCard label="搭精舍車（大車）" value={largePeople.length} color="bg-blue-50 border-blue-200 text-blue-700" />
+          <StatCard label="小車（自行/共乘）" value={smallPeople.length} color="bg-green-50 border-green-200 text-green-700" />
+          <StatCard
+            label="其他/未填"
+            value={regs.length - largePeople.length - smallPeople.length}
+            color="bg-gray-50 border-gray-200 text-gray-600"
+          />
+        </div>
+
+        {/* ── 大車排班 ── */}
+        <section>
+          <h2 className="text-base font-bold text-gray-700 mb-4">🚌 大車排班</h2>
+
+          {/* 設定列 */}
+          <div className="flex items-end gap-3 mb-4 flex-wrap">
+            <label className="flex flex-col gap-1 text-sm text-gray-600">
+              車輛數
+              <input
+                type="number" min="1" max="15"
+                value={carCount}
+                onChange={e => setCarCount(e.target.value)}
+                className="w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-sm text-gray-600">
+              每車座位
+              <input
+                type="number" min="1" max="60"
+                value={seatsPerCar}
+                onChange={e => setSeatsPerCar(e.target.value)}
+                className="w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              />
+            </label>
+            <button
+              onClick={handleAutoArrange}
+              className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors font-medium self-end"
+            >
+              ✨ 自動排車
+            </button>
+            {cars.length > 0 && (
+              <button
+                onClick={() => { if (window.confirm('確定清除所有排車結果？')) setCars([]) }}
+                className="px-3 py-2 text-sm border rounded-lg text-gray-500 hover:bg-gray-100 self-end"
+              >
+                清除
+              </button>
+            )}
+          </div>
+
+          {/* 提示 */}
+          <p className="text-xs text-gray-400 mb-4">
+            自動排車邏輯：優先將「關係連結」中的成員安排同車 → 再依班級分配剩餘座位。<br />
+            排好後可用每人右側的下拉選單手動調整車次，並勾選「領隊」標記當車領隊。
+          </p>
+
+          {/* 車輛卡片 */}
+          {cars.length === 0 ? (
+            <div className="text-sm text-gray-400 py-10 text-center border-2 border-dashed rounded-xl">
+              尚未排車，請設定車輛數後點「✨ 自動排車」
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {cars.map((car, ci) => (
+                <div key={car.tempId} className="bg-white border rounded-xl shadow-sm overflow-hidden">
+                  {/* 車次標題 */}
+                  <div className="flex items-center gap-3 px-4 py-3 bg-gray-50 border-b">
+                    <input
+                      value={car.car_name}
+                      onChange={e => updateCarName(ci, e.target.value)}
+                      className="font-semibold text-sm bg-transparent border-b border-transparent hover:border-gray-300 focus:border-amber-400 focus:outline-none px-1 py-0.5 w-28"
+                    />
+                    <span className="text-xs text-gray-400">{car.members.length} / {car.seats} 人</span>
+                    {car.leaders.length > 0 && (
+                      <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                        領隊：{car.leaders.map(lid => regMap[lid]?.students?.name ?? '?').join('、')}
+                      </span>
+                    )}
+                    {car.members.length >= car.seats && (
+                      <span className="text-xs text-red-500 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">已滿</span>
+                    )}
+                  </div>
+                  {/* 成員列表 */}
+                  <div className="divide-y">
+                    {car.members.length === 0 ? (
+                      <div className="px-4 py-3 text-xs text-gray-400">（此車目前無人）</div>
+                    ) : (
+                      car.members.map(regId => (
+                        <PersonRow
+                          key={regId}
+                          reg={regMap[regId]}
+                          carIdx={ci}
+                          cars={cars}
+                          onMove={movePerson}
+                          onToggleLeader={toggleLeader}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 未分配 */}
+          {unassigned.length > 0 && (
+            <div className="mt-3 bg-yellow-50 border border-yellow-300 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 bg-yellow-100 border-b border-yellow-200">
+                <span className="font-semibold text-yellow-800 text-sm">⚠️ 未分配（{unassigned.length} 人）</span>
+                <span className="text-xs text-yellow-600 ml-2">— 座位已滿，無法分配</span>
+              </div>
+              <div className="divide-y">
+                {unassigned.map(r => (
+                  <PersonRow
+                    key={r.registration_id}
+                    reg={r}
+                    carIdx={-1}
+                    cars={cars}
+                    onMove={movePerson}
+                    onToggleLeader={() => {}}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* ── 小車配對 ── */}
+        {smallPeople.length > 0 && (
+          <section>
+            <h2 className="text-base font-bold text-gray-700 mb-2">🚗 小車配對</h2>
+            <p className="text-xs text-gray-400 mb-4">
+              依報名填寫的「共乘者姓名」自動配對司機與乘客。若找不到對應司機，顯示於「找不到司機」群組。
+            </p>
+            <div className="space-y-2">
+              {smallGroups.map(g => (
+                <div
+                  key={g.key}
+                  className={`bg-white border rounded-xl shadow-sm overflow-hidden ${g.isUnmatched ? 'border-orange-300' : ''}`}
+                >
+                  <div className={`flex items-center gap-2 px-4 py-3 border-b text-sm font-semibold ${g.isUnmatched ? 'bg-orange-50 text-orange-700' : 'bg-gray-50 text-gray-700'}`}>
+                    <span>{g.isUnmatched ? '⚠️ 找不到司機' : `🚗 司機：${g.driverName}`}</span>
+                    {g.plate && <span className="text-gray-400 text-xs font-normal">{g.plate}</span>}
+                    <span className="text-xs text-gray-400 font-normal ml-auto">{g.members.length} 人</span>
+                  </div>
+                  <div className="divide-y">
+                    {g.members.map(r => {
+                      const cls       = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
+                      const isDriver  = isSmallDriver(r.answers)
+                      const carpoolNm = r.answers?.carpool_up ?? ''
+                      return (
+                        <div key={r.registration_id} className="flex items-center gap-2 px-4 py-2 text-sm">
+                          <span className="flex-1 font-medium">{r.students?.name ?? '?'}</span>
+                          {cls && <span className="text-xs text-gray-400">{cls}</span>}
+                          <span className="text-xs text-gray-300">
+                            {isDriver ? '（司機）' : carpoolNm ? `→ ${carpoolNm}` : ''}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* ── 總領隊 ── */}
+        <section>
+          <h2 className="text-base font-bold text-gray-700 mb-3">👑 總領隊</h2>
+          <select
+            value={headLeaderRegId}
+            onChange={e => setHeadLeaderRegId(e.target.value)}
+            className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 w-full max-w-xs"
+          >
+            <option value="">（未設定）</option>
+            {regs.map(r => {
+              const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
+              return (
+                <option key={r.registration_id} value={r.registration_id}>
+                  {r.students?.name ?? '?'}{cls ? `　${cls}` : ''}
+                </option>
+              )
+            })}
+          </select>
+          <p className="text-xs text-gray-400 mt-2">
+            總領隊可查看所有車的報到狀況。領隊報到頁（含連結與身份驗證）將於下一批次建立。
+          </p>
+        </section>
+
+      </div>
+    </AdminLayout>
+  )
+}

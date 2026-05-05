@@ -676,7 +676,7 @@ export async function getEventRegistrationsDetail(eventId) {
 }
 
 /**
- * 取得活動的大車排班結果（含成員與領隊）
+ * 取得活動的排班結果（大車 + 小車，含成員與領隊）
  */
 export async function getCarArrangement(eventId) {
   const { data, error } = await supabase
@@ -687,7 +687,6 @@ export async function getCarArrangement(eventId) {
       car_leaders ( registration_id )
     `)
     .eq('event_id', eventId)
-    .eq('car_type', 'large')
     .order('sort_order', { ascending: true })
 
   if (error) return { cars: [], error: error.message }
@@ -695,49 +694,65 @@ export async function getCarArrangement(eventId) {
 }
 
 /**
- * 儲存大車排班（全量取代）
+ * 儲存排班結果（大車 + 小車，全量取代）
+ * @param {Array} largeCars   大車陣列
+ * @param {Array} smallGroups 小車群組（finalSmallGroups，含 key=司機 reg_id、allMembers）
  */
-export async function saveCarArrangement(eventId, cars) {
-  // 刪除舊的大車資料（CASCADE 刪 car_members、car_leaders）
+export async function saveCarArrangement(eventId, largeCars, smallGroups = []) {
+  // 刪除此活動所有車輛（CASCADE 刪 car_members、car_leaders）
   const { error: delErr } = await supabase
     .from('car_assignments')
     .delete()
     .eq('event_id', eventId)
-    .eq('car_type', 'large')
 
   if (delErr) return { success: false, error: delErr.message }
-  if (cars.length === 0) return { success: true, error: null }
+  if (largeCars.length === 0 && smallGroups.length === 0) return { success: true, error: null }
 
-  // 插入車輛（含 sort_order 保序）
-  const carRows = cars.map((c, i) => ({
-    event_id: eventId,
-    car_name: c.car_name,
-    seats: c.seats,
-    car_type: 'large',
-    note: c.note || null,
-    sort_order: i,
-  }))
+  // 組合所有車輛列
+  const carRows = [
+    ...largeCars.map((c, i) => ({
+      event_id: eventId,
+      car_name: c.car_name,
+      seats:    c.seats,
+      car_type: 'large',
+      note:     c.note || null,
+      sort_order: i,
+    })),
+    ...smallGroups.map((g, i) => ({
+      event_id: eventId,
+      car_name: `小車 ${i + 1}`,
+      seats:    g.allMembers.length,
+      car_type: 'small',
+      note:     g.key,   // 司機的 registration_id，重載時用來重建孤兒指派
+      sort_order: i,
+    })),
+  ]
 
   const { data: inserted, error: insErr } = await supabase
     .from('car_assignments')
     .insert(carRows)
-    .select('car_id, sort_order')
+    .select('car_id, car_type, sort_order')
 
   if (insErr) return { success: false, error: insErr.message }
 
-  // 依 sort_order 對應到原始 cars 陣列
-  const sortToCarId = Object.fromEntries(inserted.map(c => [c.sort_order, c.car_id]))
+  const largeIds = Object.fromEntries(inserted.filter(c => c.car_type === 'large').map(c => [c.sort_order, c.car_id]))
+  const smallIds = Object.fromEntries(inserted.filter(c => c.car_type === 'small').map(c => [c.sort_order, c.car_id]))
 
   const memberRows = []
   const leaderRows = []
 
-  for (let i = 0; i < cars.length; i++) {
-    const carId = sortToCarId[i]
-    for (const rid of cars[i].members) {
-      memberRows.push({ car_id: carId, registration_id: rid })
-    }
-    for (const rid of cars[i].leaders) {
-      leaderRows.push({ car_id: carId, registration_id: rid })
+  for (let i = 0; i < largeCars.length; i++) {
+    const carId = largeIds[i]
+    if (!carId) continue
+    for (const rid of largeCars[i].members) memberRows.push({ car_id: carId, registration_id: rid })
+    for (const rid of largeCars[i].leaders) leaderRows.push({ car_id: carId, registration_id: rid })
+  }
+
+  for (let i = 0; i < smallGroups.length; i++) {
+    const carId = smallIds[i]
+    if (!carId) continue
+    for (const r of smallGroups[i].allMembers) {
+      memberRows.push({ car_id: carId, registration_id: r.registration_id })
     }
   }
 
@@ -745,7 +760,6 @@ export async function saveCarArrangement(eventId, cars) {
     const { error: mErr } = await supabase.from('car_members').insert(memberRows)
     if (mErr) return { success: false, error: mErr.message }
   }
-
   if (leaderRows.length > 0) {
     const { error: lErr } = await supabase.from('car_leaders').insert(leaderRows)
     if (lErr) return { success: false, error: lErr.message }

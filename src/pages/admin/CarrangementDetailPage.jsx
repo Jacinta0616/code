@@ -36,7 +36,13 @@ function findGuestMatch(note, studentRegs) {
 }
 
 // 判斷交通方式
-const isLargeCar      = ans => (ans?.transport_up ?? '').includes('精舍')
+// isLargeCar 接受完整 reg 物件（需判斷是否為訪客）
+const isLargeCar = r => {
+  const t = r.answers?.transport_up ?? ''
+  if (r.student_id) return t.includes('精舍')
+  // 訪客：沒有明確選「自行開車」或「搭學員」的，視為搭大車
+  return !t.includes('自行開車') && !t.includes('搭學員')
+}
 const isSmallDriver   = ans => (ans?.transport_up ?? '').includes('自行開車')
 const isSmallPassenger= ans => (ans?.transport_up ?? '').includes('搭學員')
 const isSmallCar      = ans => isSmallDriver(ans) || isSmallPassenger(ans)
@@ -249,7 +255,7 @@ export default function CarrangementDetailPage() {
 
   // ── 衍生資料（含訪客）──
   const regMap      = useMemo(() => Object.fromEntries(regs.map(r => [r.registration_id, r])), [regs])
-  const largePeople = useMemo(() => regs.filter(r => isLargeCar(r.answers)), [regs])
+  const largePeople = useMemo(() => regs.filter(r => isLargeCar(r)), [regs])
   const smallPeople = useMemo(() => regs.filter(r => isSmallCar(r.answers)), [regs])
 
   // 小車配對：matchedGroups + orphans
@@ -309,16 +315,39 @@ export default function CarrangementDetailPage() {
     setRelGroups(groups)
 
     if (savedCars.length > 0) {
-      const mapped = savedCars.map(c => ({
-        tempId:  c.car_id,
-        car_name: c.car_name,
-        seats:   c.seats,
-        members: (c.car_members ?? []).map(m => m.registration_id),
-        leaders: (c.car_leaders ?? []).map(l => l.registration_id),
-      }))
-      setCars(mapped)
-      setCarCount(mapped.length)
-      setSeatsPerCar(mapped[0]?.seats ?? 20)
+      // 大車
+      const largeSaved = savedCars.filter(c => c.car_type === 'large')
+      if (largeSaved.length > 0) {
+        const mapped = largeSaved.map(c => ({
+          tempId:   c.car_id,
+          car_name: c.car_name,
+          seats:    c.seats,
+          members:  (c.car_members ?? []).map(m => m.registration_id),
+          leaders:  (c.car_leaders ?? []).map(l => l.registration_id),
+        }))
+        setCars(mapped)
+        setCarCount(mapped.length)
+        setSeatsPerCar(mapped[0]?.seats ?? 20)
+      }
+
+      // 小車：從已存的成員列表還原孤兒指派
+      const smallSaved = savedCars.filter(c => c.car_type === 'small')
+      if (smallSaved.length > 0) {
+        const smallRegs = registrations.filter(r => isSmallCar(r.answers))
+        const { matchedGroups: freshMatched } = computeSmallGroups(smallRegs)
+        const restored = {}
+        for (const savedCar of smallSaved) {
+          const groupKey = savedCar.note   // 司機的 registration_id
+          const freshGroup = freshMatched.find(g => g.key === groupKey)
+          const originalIds = new Set((freshGroup?.members ?? []).map(m => m.registration_id))
+          for (const member of (savedCar.car_members ?? [])) {
+            if (!originalIds.has(member.registration_id)) {
+              restored[member.registration_id] = groupKey
+            }
+          }
+        }
+        setOrphanAssignments(restored)
+      }
     }
 
     if (headLeader) setHeadLeaderRegId(headLeader.registration_id ?? '')
@@ -355,7 +384,7 @@ export default function CarrangementDetailPage() {
   async function handleSave() {
     setSaving(true); setMsg('')
     const [carRes, hlRes] = await Promise.all([
-      saveCarArrangement(eventId, cars),
+      saveCarArrangement(eventId, cars, finalSmallGroups),
       headLeaderRegId
         ? saveHeadLeader(eventId, headLeaderRegId)
         : Promise.resolve({ success: true }),

@@ -144,11 +144,13 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
   })
 
   // 逐人排入：嚴格不超過座位數，座位滿了移到下一台車（同班同組盡量同車，但不強制）
+  // 所有車都滿時，剩餘的人留在 unassigned 警示區
   let ci = 0
-  for (const group of sortedGroups) {
+  outer: for (const group of sortedGroups) {
     for (const rid of group.members) {
-      // 找到有空位的車（不超過座位數）
-      while (ci < carCount - 1 && cars[ci].members.length >= cars[ci].seats) ci++
+      // 往後找到有空位的車
+      while (ci < carCount && cars[ci].members.length >= cars[ci].seats) ci++
+      if (ci >= carCount) break outer  // 全部座位都滿，停止排班
       cars[ci].members.push(rid)
       assigned.add(rid)
     }
@@ -202,7 +204,7 @@ function sortedMembersForDisplay(memberIds, regMap) {
 
 // ─── PersonRow 元件 ───────────────────────────────────────────
 
-function PersonRow({ reg, carIdx, cars, onMove, onToggleLeader, guestInfo }) {
+function PersonRow({ reg, carIdx, cars, smallGroups, onMove, onToggleLeader, guestInfo }) {
   const name     = getName(reg)
   const cls      = getClasses(reg).map(c => [c.class_name, c.group_name].filter(Boolean).join(' ')).join('／')
   const isLeader = carIdx >= 0 && (cars[carIdx]?.leaders.includes(reg.registration_id) ?? false)
@@ -248,13 +250,29 @@ function PersonRow({ reg, carIdx, cars, onMove, onToggleLeader, guestInfo }) {
       )}
       <select
         value={carIdx >= 0 ? String(carIdx) : ''}
-        onChange={e => onMove(reg.registration_id, e.target.value === '' ? -1 : Number(e.target.value))}
+        onChange={e => {
+          const v = e.target.value
+          if (v === '') onMove(reg.registration_id, -1)
+          else if (v.startsWith('small:')) onMove(reg.registration_id, v)
+          else onMove(reg.registration_id, Number(v))
+        }}
         className="text-xs border rounded px-1.5 py-0.5 bg-white shrink-0 focus:outline-none focus:ring-1 focus:ring-amber-400"
       >
         <option value="">未分配</option>
         {cars.map((c, i) => (
           <option key={c.tempId} value={String(i)}>{c.car_name}</option>
         ))}
+        {/* 訪客在未分配時，額外顯示小車選項 */}
+        {isGuest && carIdx < 0 && (smallGroups ?? []).length > 0 && (
+          <>
+            <option disabled>──小車──</option>
+            {(smallGroups ?? []).map((g, gi) => (
+              <option key={g.key} value={`small:${g.key}`}>
+                小車 {gi + 1}・{g.driverName}
+              </option>
+            ))}
+          </>
+        )}
       </select>
     </div>
   )
@@ -293,25 +311,29 @@ export default function CarrangementDetailPage() {
   const [copyMsg, setCopyMsg]               = useState('')
   // orphanAssignments: { [registrationId]: groupKey(小車 key) }
   const [orphanAssignments, setOrphanAssignments] = useState({})
+  // guestSmallOverrides: { [registrationId]: groupKey } — 訪客被手動移到小車（從大車移出）
+  const [guestSmallOverrides, setGuestSmallOverrides] = useState({})
 
   // ── 衍生資料（含訪客）──
   const regMap      = useMemo(() => Object.fromEntries(regs.map(r => [r.registration_id, r])), [regs])
-  const largePeople = useMemo(() => regs.filter(r => isLargeCar(r)), [regs])
+  // 已被手動移到小車的訪客，不再出現在大車名單
+  const largePeople = useMemo(() => regs.filter(r => isLargeCar(r) && !guestSmallOverrides.hasOwnProperty(r.registration_id)), [regs, guestSmallOverrides])
   const smallPeople = useMemo(() => regs.filter(r => isSmallCar(r.answers)), [regs])
 
   // 小車配對：matchedGroups + orphans
   const { matchedGroups, orphans } = useMemo(() => computeSmallGroups(smallPeople), [smallPeople])
 
-  // 把已手動指派的孤兒乘客併入對應的小車群組
+  // 把已手動指派的孤兒乘客 + 從大車移過來的訪客，併入對應的小車群組
   const finalSmallGroups = useMemo(() =>
     matchedGroups.map(g => ({
       ...g,
       allMembers: [
         ...g.members,
         ...orphans.filter(o => orphanAssignments[o.registration_id] === g.key),
+        ...regs.filter(r => !r.student_id && guestSmallOverrides[r.registration_id] === g.key),
       ],
     })),
-  [matchedGroups, orphans, orphanAssignments])
+  [matchedGroups, orphans, orphanAssignments, regs, guestSmallOverrides])
 
   // 尚未指定小車的孤兒
   const unassignedOrphans = useMemo(() =>
@@ -411,12 +433,38 @@ export default function CarrangementDetailPage() {
     setCars(autoArrange(largePeople, Number(carCount), Number(seatsPerCar), relGroups))
   }
 
-  function movePerson(regId, targetCarIdx) {
-    setCars(prev => prev.map((c, i) => {
-      const without = { ...c, members: c.members.filter(id => id !== regId), leaders: c.leaders.filter(id => id !== regId) }
-      if (i === targetCarIdx) return { ...without, members: [...without.members, regId] }
-      return without
-    }))
+  function movePerson(regId, target) {
+    // target 可能是大車 index（數字）或 'small:groupKey'（移到小車）或 -1（未分配）
+    if (typeof target === 'string' && target.startsWith('small:')) {
+      const groupKey = target.slice(6)
+      // 從大車中移除
+      setCars(prev => prev.map(c => ({
+        ...c,
+        members: c.members.filter(id => id !== regId),
+        leaders: c.leaders.filter(id => id !== regId),
+      })))
+      // 標記為移到小車
+      setGuestSmallOverrides(prev => ({ ...prev, [regId]: groupKey }))
+    } else if (target === 'back-to-large') {
+      // 從小車移回大車未分配
+      setGuestSmallOverrides(prev => {
+        const next = { ...prev }
+        delete next[regId]
+        return next
+      })
+    } else {
+      const targetCarIdx = typeof target === 'string' ? Number(target) : target
+      // 如果這個人之前在小車（guestSmallOverrides），先清除
+      setGuestSmallOverrides(prev => {
+        if (!prev.hasOwnProperty(regId)) return prev
+        const next = { ...prev }; delete next[regId]; return next
+      })
+      setCars(prev => prev.map((c, i) => {
+        const without = { ...c, members: c.members.filter(id => id !== regId), leaders: c.leaders.filter(id => id !== regId) }
+        if (i === targetCarIdx) return { ...without, members: [...without.members, regId] }
+        return without
+      }))
+    }
   }
 
   function toggleLeader(carIdx, regId) {
@@ -710,6 +758,7 @@ export default function CarrangementDetailPage() {
                     reg={r}
                     carIdx={-1}
                     cars={cars}
+                    smallGroups={finalSmallGroups}
                     onMove={movePerson}
                     onToggleLeader={() => {}}
                     guestInfo={guestInfoMap[r.registration_id]}

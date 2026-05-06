@@ -119,26 +119,31 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     }
   }
 
-  // 剩餘依班級、組別排序後依序填入（只排學員，訪客另外處理）
-  const remaining = largePeople
-    .filter(r => r.student_id && !assigned.has(r.registration_id))
-    .sort((a, b) => {
-      const ac = getClasses(a)[0]?.class_name ?? ''
-      const bc = getClasses(b)[0]?.class_name ?? ''
-      if (ac !== bc) return ac.localeCompare(bc, 'zh-TW')
-      const ag = getClasses(a)[0]?.group_name ?? ''
-      const bg = getClasses(b)[0]?.group_name ?? ''
-      return ag.localeCompare(bg, 'zh-TW')
-    })
+  // 剩餘學員依班別＋組別分成小群，整群為單位排入（不拆散）
+  const remaining = largePeople.filter(r => r.student_id && !assigned.has(r.registration_id))
 
-  // 班級同學儘量塞同一台車（不先輪換車次）
+  // 按「班別 + 組別」分群
+  const groupMap = {}
+  for (const r of remaining) {
+    const cls = getClasses(r)[0]
+    const key = `${cls?.class_name ?? ''}|||${cls?.group_name ?? ''}`
+    if (!groupMap[key]) groupMap[key] = { className: cls?.class_name ?? '', groupName: cls?.group_name ?? '', members: [] }
+    groupMap[key].members.push(r.registration_id)
+  }
+
+  // 排序：先班別、再組別
+  const sortedGroups = Object.values(groupMap).sort((a, b) => {
+    if (a.className !== b.className) return a.className.localeCompare(b.className, 'zh-TW')
+    return a.groupName.localeCompare(b.groupName, 'zh-TW')
+  })
+
+  // 整群塞入：塞不下就移到下一台車（保持組別完整）
   let ci = 0
-  for (const p of remaining) {
-    while (ci < carCount && cars[ci].members.length >= cars[ci].seats) ci++
-    if (ci >= carCount) break
-    cars[ci].members.push(p.registration_id)
-    assigned.add(p.registration_id)
-    if (cars[ci].members.length >= cars[ci].seats) ci++
+  for (const group of sortedGroups) {
+    // 往後找到能容納整群的車
+    while (ci < carCount - 1 && cars[ci].members.length + group.members.length > cars[ci].seats) ci++
+    // 塞入（若單群超過一整台車容量，超過也強制排入）
+    for (const rid of group.members) { cars[ci].members.push(rid); assigned.add(rid) }
   }
 
   // 處理訪客：有備註且能配對到學員 → 強制排同車（超過座位也排）
@@ -158,6 +163,33 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
   }
 
   return cars
+}
+
+// ─── 車內成員顯示排序 ──────────────────────────────────────────
+// 同班同組排在一起，訪客緊接在親友後面
+
+function sortedMembersForDisplay(memberIds, regMap) {
+  const regs = memberIds.map(id => regMap[id]).filter(Boolean)
+  const studentRegsInCar = regs.filter(r => r.student_id)
+
+  // 學員依班別→組別排序
+  const sortedStudents = [...regs.filter(r => r.student_id)].sort((a, b) => {
+    const ca = getClasses(a)[0], cb = getClasses(b)[0]
+    const classA = ca?.class_name ?? '', classB = cb?.class_name ?? ''
+    if (classA !== classB) return classA.localeCompare(classB, 'zh-TW')
+    return (ca?.group_name ?? '').localeCompare(cb?.group_name ?? '', 'zh-TW')
+  })
+
+  // 訪客插在親友後面
+  const result = sortedStudents.map(r => r.registration_id)
+  for (const guest of regs.filter(r => !r.student_id)) {
+    const note    = getGuestNote(guest)
+    const matched = findGuestMatch(note, studentRegsInCar)
+    const idx     = matched ? result.indexOf(matched.registration_id) : -1
+    if (idx >= 0) result.splice(idx + 1, 0, guest.registration_id)
+    else result.push(guest.registration_id)
+  }
+  return result
 }
 
 // ─── PersonRow 元件 ───────────────────────────────────────────
@@ -595,7 +627,7 @@ export default function CarrangementDetailPage() {
                     {car.members.length === 0 ? (
                       <div className="px-4 py-3 text-xs text-gray-400">（此車目前無人）</div>
                     ) : (
-                      car.members.map(regId => (
+                      sortedMembersForDisplay(car.members, regMap).map(regId => (
                         <PersonRow
                           key={regId}
                           reg={regMap[regId]}

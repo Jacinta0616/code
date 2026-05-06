@@ -61,6 +61,7 @@ export default function CarCheckinPage() {
   const [headLeader, setHeadLeader] = useState(null)
   const [allCars, setAllCars]     = useState([])
   const [expandedCarId, setExpandedCarId] = useState(null)
+  const [expandedSmallCarId, setExpandedSmallCarId] = useState(null)
 
   // 共用
   const [scanMsg, setScanMsg]     = useState('')
@@ -567,18 +568,92 @@ export default function CarCheckinPage() {
             )
           })}
 
-          {/* ── 小車（合併摘要） ── */}
+          {/* ── 小車（摘要 + 可展開各台） ── */}
           {smallCars.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3.5">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-semibold text-gray-800">🚗 小車（共 {smallCars.length} 台）</span>
-                {smallChecked === smallTotal && smallTotal > 0 && (
-                  <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-1.5">全員出發 ✓</span>
-                )}
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                應到 {smallTotal}　已到 {smallChecked}　未到 {smallTotal - smallChecked}
-              </div>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {/* 小車總摘要列（點擊展開/收合所有小車） */}
+              <button
+                onClick={() => setExpandedCarId(expandedCarId === '__small__' ? null : '__small__')}
+                className="w-full px-4 py-3.5 flex items-center gap-3 text-left hover:bg-gray-50 active:bg-gray-100 transition-colors"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-gray-800">🚗 小車（共 {smallCars.length} 台）</span>
+                    {smallChecked === smallTotal && smallTotal > 0 && (
+                      <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-1.5">全員出發 ✓</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    應到 {smallTotal}　已到 {smallChecked}　未到 {smallTotal - smallChecked}
+                  </div>
+                </div>
+                <span className="text-gray-300 text-xs shrink-0">
+                  {expandedCarId === '__small__' ? '▲' : '▼'}
+                </span>
+              </button>
+
+              {/* 展開：各台小車（用獨立 expandedSmallCarId 管內層） */}
+              {expandedCarId === '__small__' && (
+                <div className="border-t divide-y">
+                  {smallCars.map(c => {
+                    const total     = c.car_members?.length ?? 0
+                    const checked   = (c.car_members ?? []).filter(isCheckedIn).length
+                    const unchecked = total - checked
+                    const done      = checked === total && total > 0
+                    const innerExp  = expandedSmallCarId === c.car_id
+
+                    const sorted = [...(c.car_members ?? [])].sort((a, b) =>
+                      (isCheckedIn(a) ? 1 : 0) - (isCheckedIn(b) ? 1 : 0)
+                    )
+
+                    return (
+                      <div key={c.car_id} className="bg-gray-50">
+                        <button
+                          onClick={() => setExpandedSmallCarId(innerExp ? null : c.car_id)}
+                          className="w-full px-5 py-2.5 flex items-center gap-3 text-left hover:bg-gray-100 transition-colors"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium text-sm text-gray-700">{c.car_name}</span>
+                              {done && <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-1.5">全員出發 ✓</span>}
+                            </div>
+                            <div className="text-xs text-gray-400 mt-0.5">
+                              應到 {total}　已到 {checked}　未到 {unchecked}
+                            </div>
+                          </div>
+                          <span className="text-gray-300 text-xs shrink-0">{innerExp ? '▲' : '▼'}</span>
+                        </button>
+
+                        {innerExp && (
+                          <div className="bg-white border-t divide-y">
+                            {sorted.map(member => {
+                              const name  = getMemberName(member)
+                              const guest = isGuest(member)
+                              const chk   = isCheckedIn(member)
+                              return (
+                                <div key={member.registration_id} className={`flex items-center gap-3 px-5 py-2.5 ${chk ? 'opacity-55' : ''}`}>
+                                  <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
+                                    <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
+                                    {guest && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                                  </div>
+                                  <button
+                                    onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
+                                    className={`shrink-0 px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                                      chk ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500' : 'bg-green-600 text-white hover:bg-green-700'
+                                    }`}
+                                  >
+                                    {chk ? '已到' : '報到'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )}
 

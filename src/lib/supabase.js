@@ -701,7 +701,7 @@ export async function getEventRegistrationsDetail(eventId) {
 }
 
 /**
- * 取得活動的排班結果（大車 + 小車，含成員與領隊）
+ * 取得活動的排班結果（大車 + 小車，含成員、領隊、法師）
  */
 export async function getCarArrangement(eventId) {
   const { data, error } = await supabase
@@ -709,7 +709,8 @@ export async function getCarArrangement(eventId) {
     .select(`
       car_id, car_name, seats, car_type, note, access_token, sort_order,
       car_members ( registration_id ),
-      car_leaders ( registration_id )
+      car_leaders ( registration_id ),
+      car_monks ( id, monk_id, checked_in_at )
     `)
     .eq('event_id', eventId)
     .order('sort_order', { ascending: true })
@@ -788,6 +789,20 @@ export async function saveCarArrangement(eventId, largeCars, smallGroups = []) {
   if (leaderRows.length > 0) {
     const { error: lErr } = await supabase.from('car_leaders').insert(leaderRows)
     if (lErr) return { success: false, error: lErr.message }
+  }
+
+  // 法師指派
+  const monkRows = []
+  for (let i = 0; i < largeCars.length; i++) {
+    const carId = largeIds[i]
+    if (!carId) continue
+    for (const monkId of (largeCars[i].monks ?? [])) {
+      monkRows.push({ car_id: carId, monk_id: monkId })
+    }
+  }
+  if (monkRows.length > 0) {
+    const { error: moErr } = await supabase.from('car_monks').insert(monkRows)
+    if (moErr) return { success: false, error: moErr.message }
   }
 
   return { success: true, error: null }
@@ -962,7 +977,8 @@ export async function getCarByToken(token) {
           students ( name )
         )
       ),
-      car_leaders ( registration_id )
+      car_leaders ( registration_id ),
+      car_monks ( id, monk_id, checked_in_at, temple_monks ( name ) )
     `)
     .eq('access_token', token)
     .single()
@@ -1011,7 +1027,8 @@ export async function getAllCarsProgress(eventId) {
           registration_id, answers, checked_in_at, student_id,
           students ( name )
         )
-      )
+      ),
+      car_monks ( id, monk_id, checked_in_at, temple_monks ( name ) )
     `)
     .eq('event_id', eventId)
     .order('car_type', { ascending: false })   // large 排前面
@@ -1109,6 +1126,90 @@ export async function findLeaderByStudentId(studentId) {
   }
 
   return { roles }
+}
+
+// ─── 法師管理（後台）────────────────────────────────────────
+
+/**
+ * 取得法師名單（預設只取 active=true）
+ */
+export async function getMonks(includeInactive = false) {
+  let query = supabase
+    .from('temple_monks')
+    .select('id, name, notes, active, created_at')
+    .order('created_at', { ascending: true })
+
+  if (!includeInactive) query = query.eq('active', true)
+
+  const { data, error } = await query
+  if (error) return { monks: [], error: error.message }
+  return { monks: data || [], error: null }
+}
+
+/**
+ * 新增法師
+ */
+export async function createMonk(name, notes) {
+  const { data, error } = await supabase
+    .from('temple_monks')
+    .insert({ name, notes: notes || null })
+    .select('id')
+    .single()
+  if (error) return { success: false, error: error.message }
+  return { success: true, id: data.id, error: null }
+}
+
+/**
+ * 更新法師資料
+ */
+export async function updateMonk(id, { name, notes, active }) {
+  const fields = {}
+  if (name     !== undefined) fields.name   = name
+  if (notes    !== undefined) fields.notes  = notes || null
+  if (active   !== undefined) fields.active = active
+
+  const { error } = await supabase
+    .from('temple_monks')
+    .update(fields)
+    .eq('id', id)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
+/**
+ * 刪除法師（硬刪除，car_monks 會 CASCADE 清除）
+ */
+export async function deleteMonk(id) {
+  const { error } = await supabase
+    .from('temple_monks')
+    .delete()
+    .eq('id', id)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
+/**
+ * 法師報到（更新 car_monks.checked_in_at）
+ */
+export async function checkInMonk(carMonkId) {
+  const { error } = await supabase
+    .from('car_monks')
+    .update({ checked_in_at: new Date().toISOString() })
+    .eq('id', carMonkId)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
+/**
+ * 取消法師報到
+ */
+export async function uncheckInMonk(carMonkId) {
+  const { error } = await supabase
+    .from('car_monks')
+    .update({ checked_in_at: null })
+    .eq('id', carMonkId)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
 }
 
 // ─── 學員管理（後台）────────────────────────────────────────

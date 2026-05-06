@@ -11,6 +11,7 @@ import {
   setHeadLeader as saveHeadLeader,
   getSmallCarLeader,
   setSmallCarLeader as saveSmallCarLeader,
+  getMonks,
 } from '../../lib/supabase'
 
 // ─── 常數與工具 ───────────────────────────────────────────────
@@ -92,6 +93,7 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     seats: Number(seats),
     members: [],
     leaders: [],
+    monks: [],
   }))
 
   const assigned    = new Set()
@@ -323,6 +325,7 @@ export default function CarrangementDetailPage() {
   const [headLeaderToken, setHeadLeaderToken] = useState('')
   const [smallCarLeaderRegId, setSmallCarLeaderRegId] = useState('')
   const [smallCarLeaderToken, setSmallCarLeaderToken] = useState('')
+  const [allMonks, setAllMonks]             = useState([])
   const [saving,  setSaving]                = useState(false)
   const [msg,     setMsg]                   = useState('')
   const [copyMsg, setCopyMsg]               = useState('')
@@ -382,14 +385,16 @@ export default function CarrangementDetailPage() {
 
   async function load() {
     setLoading(true)
-    const [{ events }, { registrations }, { groups }, { cars: savedCars }, { headLeader }, { headLeader: smallCarLeader }] = await Promise.all([
+    const [{ events }, { registrations }, { groups }, { cars: savedCars }, { headLeader }, { headLeader: smallCarLeader }, { monks: monkList }] = await Promise.all([
       getAllEvents(),
       getEventRegistrationsDetail(eventId),
       getRelationshipGroups(),
       getCarArrangement(eventId),
       getHeadLeader(eventId),
       getSmallCarLeader(eventId),
+      getMonks(),
     ])
+    setAllMonks(monkList ?? [])
 
     setEvent(events.find(e => e.event_id === eventId) ?? null)
     setRegs(registrations)
@@ -406,6 +411,7 @@ export default function CarrangementDetailPage() {
           members:      (c.car_members ?? []).map(m => m.registration_id),
           leaders:      (c.car_leaders ?? []).map(l => l.registration_id),
           access_token: c.access_token ?? '',
+          monks:        (c.car_monks ?? []).map(m => m.monk_id),
         }))
         setCars(mapped)
         setCarCount(mapped.length)
@@ -500,6 +506,14 @@ export default function CarrangementDetailPage() {
     }))
   }
 
+  function toggleMonk(carIdx, monkId) {
+    setCars(prev => prev.map((c, i) => {
+      if (i !== carIdx) return c
+      const has = (c.monks ?? []).includes(monkId)
+      return { ...c, monks: has ? c.monks.filter(id => id !== monkId) : [...(c.monks ?? []), monkId] }
+    }))
+  }
+
   function updateCarName(carIdx, name) {
     setCars(prev => prev.map((c, i) => i === carIdx ? { ...c, car_name: name } : c))
   }
@@ -549,6 +563,11 @@ export default function CarrangementDetailPage() {
         const identity = r.answers?.identity ?? ''
         const note     = car.leaders.includes(regId) ? '領隊' : ''
         rows.push([car.car_name, name, cls, grp, identity, note])
+      }
+      // 法師
+      for (const monkId of (car.monks ?? [])) {
+        const monk = allMonks.find(m => m.id === monkId)
+        if (monk) rows.push([car.car_name, monk.name, '', '', '法師', '法師'])
       }
     }
 
@@ -741,6 +760,11 @@ export default function CarrangementDetailPage() {
                         領隊：{car.leaders.map(lid => regMap[lid] ? getName(regMap[lid]) : '?').join('、')}
                       </span>
                     )}
+                    {(car.monks ?? []).length > 0 && (
+                      <span className="text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded-full px-2 py-0.5">
+                        法師：{(car.monks ?? []).map(mid => allMonks.find(m => m.id === mid)?.name ?? '').filter(Boolean).join('、')}
+                      </span>
+                    )}
                     <div className="ml-auto shrink-0">
                       {car.access_token ? (
                         <button
@@ -773,6 +797,31 @@ export default function CarrangementDetailPage() {
                       ))
                     )}
                   </div>
+
+                  {/* 法師指派（可選，不強制） */}
+                  {allMonks.length > 0 && (
+                    <div className="px-4 py-3 bg-purple-50 border-t border-purple-100">
+                      <div className="text-xs font-medium text-purple-600 mb-2">🏯 搭乘法師（可選）</div>
+                      <div className="flex flex-wrap gap-2">
+                        {allMonks.map(monk => {
+                          const assigned = (car.monks ?? []).includes(monk.id)
+                          return (
+                            <button
+                              key={monk.id}
+                              onClick={() => toggleMonk(ci, monk.id)}
+                              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                                assigned
+                                  ? 'bg-purple-600 text-white border-purple-600'
+                                  : 'bg-white text-gray-600 border-gray-300 hover:border-purple-400 hover:text-purple-600'
+                              }`}
+                            >
+                              {assigned ? '✓ ' : ''}{monk.name}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

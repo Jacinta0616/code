@@ -12,6 +12,7 @@ import TemplatesPage from './pages/admin/TemplatesPage'
 import RelationshipsPage from './pages/admin/RelationshipsPage'
 import CarrangementPage from './pages/admin/CarrangementPage'
 import CarrangementDetailPage from './pages/admin/CarrangementDetailPage'
+import MonksPage from './pages/admin/MonksPage'
 import CarCheckinPage from './pages/CarCheckinPage'
 import LeaderScanPage from './pages/LeaderScanPage'
 
@@ -45,6 +46,9 @@ export default function App() {
           } />
           <Route path="/admin/relationships" element={
             <ProtectedRoute adminOnly><RelationshipsPage /></ProtectedRoute>
+          } />
+          <Route path="/admin/monks" element={
+            <ProtectedRoute adminOnly><MonksPage /></ProtectedRoute>
           } />
           <Route path="/admin/carrangement" element={
             <ProtectedRoute adminOnly><CarrangementPage /></ProtectedRoute>

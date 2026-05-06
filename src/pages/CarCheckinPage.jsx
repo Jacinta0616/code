@@ -9,6 +9,8 @@ import {
   checkIn,
   checkInAllCar,
   uncheckIn,
+  checkInMonk,
+  uncheckInMonk,
 } from '../lib/supabase'
 
 // ─── 工具 ──────────────────────────────────────────────────
@@ -232,6 +234,16 @@ export default function CarCheckinPage() {
     await refresh()
   }
 
+  // ── 法師手動點選報到（無 QR code） ──
+  async function handleToggleMonkCheckin(carMonkId, checkedAt) {
+    if (checkedAt) {
+      await uncheckInMonk(carMonkId)
+    } else {
+      await checkInMonk(carMonkId)
+    }
+    await refresh()
+  }
+
   // ── 畫面 ──
 
   if (loading) return (
@@ -256,9 +268,12 @@ export default function CarCheckinPage() {
 
   if (mode === 'car' && car) {
     const members       = car.car_members ?? []
+    const monks         = car.car_monks ?? []
     const dateStart     = car.events?.date_start
-    const checkedIn     = members.filter(isCheckedIn).length
-    const total         = members.length
+    const memberCheckedIn = members.filter(isCheckedIn).length
+    const monkCheckedIn   = monks.filter(m => !!m.checked_in_at).length
+    const checkedIn     = memberCheckedIn + monkCheckedIn
+    const total         = members.length + monks.length
     const eventName     = car.events?.name ?? ''
     const eventDate     = formatDate(dateStart)
     const pct           = total > 0 ? Math.round((checkedIn / total) * 100) : 0
@@ -358,8 +373,43 @@ export default function CarCheckinPage() {
             )
           })}
 
-          {members.length === 0 && (
+          {members.length === 0 && monks.length === 0 && (
             <div className="text-center text-gray-400 py-12 text-sm">此車目前無成員</div>
+          )}
+
+          {/* 法師列表（無 QR code，手動點選） */}
+          {monks.length > 0 && (
+            <div className="mt-2">
+              <div className="text-xs text-purple-400 px-1 mb-1.5">法師（手動點選報到）</div>
+              {monks.map(cm => {
+                const chk = !!cm.checked_in_at
+                return (
+                  <div
+                    key={cm.id}
+                    className={`flex items-center gap-3 bg-white rounded-xl px-4 py-3 shadow-sm border mb-2 transition-opacity ${
+                      chk ? 'border-green-200 opacity-60' : 'border-purple-200'
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                      <span className={`font-medium ${chk ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+                        {cm.temple_monks?.name ?? '（未知）'}
+                      </span>
+                      <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-1.5 shrink-0">法師</span>
+                    </div>
+                    <button
+                      onClick={() => handleToggleMonkCheckin(cm.id, cm.checked_in_at)}
+                      className={`shrink-0 px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${
+                        chk
+                          ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'
+                          : 'bg-green-600 text-white hover:bg-green-700 active:bg-green-800'
+                      }`}
+                    >
+                      {chk ? '已到' : '報到'}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
           )}
         </div>
 
@@ -515,9 +565,13 @@ export default function CarCheckinPage() {
     const largeCars = allCars.filter(c => c.car_type === 'large')
     const smallCars = allCars.filter(c => c.car_type === 'small')
 
-    const totalAll   = allCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
-    const checkedAll = allCars.reduce((s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0)
-    const uncheckedAll = totalAll - checkedAll
+    const memberTotalAll  = allCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
+    const monkTotalAll    = allCars.reduce((s, c) => s + (c.car_monks?.length ?? 0), 0)
+    const memberChecked   = allCars.reduce((s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0)
+    const monkCheckedAll  = allCars.reduce((s, c) => s + (c.car_monks?.filter(m => !!m.checked_in_at).length ?? 0), 0)
+    const totalAll        = memberTotalAll + monkTotalAll
+    const checkedAll      = memberChecked + monkCheckedAll
+    const uncheckedAll    = totalAll - checkedAll
 
     const smallTotal   = smallCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
     const smallChecked = smallCars.reduce((s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0)
@@ -529,6 +583,12 @@ export default function CarCheckinPage() {
         if (isCheckedIn(m)) {
           const id = m.registrations?.answers?.identity ?? '未填'
           identityCounts[id] = (identityCounts[id] ?? 0) + 1
+        }
+      }
+      // 法師計入身份統計
+      for (const cm of (c.car_monks ?? [])) {
+        if (cm.checked_in_at) {
+          identityCounts['法師'] = (identityCounts['法師'] ?? 0) + 1
         }
       }
     }
@@ -578,8 +638,8 @@ export default function CarCheckinPage() {
 
           {/* ── 大車（各台獨立） ── */}
           {largeCars.map(c => {
-            const total     = c.car_members?.length ?? 0
-            const checked   = (c.car_members ?? []).filter(isCheckedIn).length
+            const total     = (c.car_members?.length ?? 0) + (c.car_monks?.length ?? 0)
+            const checked   = (c.car_members ?? []).filter(isCheckedIn).length + (c.car_monks ?? []).filter(m => !!m.checked_in_at).length
             const unchecked = total - checked
             const done      = checked === total && total > 0
             const expanded  = expandedCarId === c.car_id
@@ -635,6 +695,28 @@ export default function CarCheckinPage() {
                           </div>
                           <button
                             onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
+                            className={`shrink-0 px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                              chk ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500' : 'bg-green-600 text-white hover:bg-green-700'
+                            }`}
+                          >
+                            {chk ? '已到' : '報到'}
+                          </button>
+                        </div>
+                      )
+                    })}
+                    {/* 法師（手動點選） */}
+                    {(c.car_monks ?? []).map(cm => {
+                      const chk = !!cm.checked_in_at
+                      return (
+                        <div key={cm.id} className={`flex items-center gap-3 px-4 py-2.5 ${chk ? 'opacity-55' : ''}`}>
+                          <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
+                            <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>
+                              {cm.temple_monks?.name ?? '（未知）'}
+                            </span>
+                            <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-1.5 shrink-0">法師</span>
+                          </div>
+                          <button
+                            onClick={() => handleToggleMonkCheckin(cm.id, cm.checked_in_at)}
                             className={`shrink-0 px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
                               chk ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500' : 'bg-green-600 text-white hover:bg-green-700'
                             }`}

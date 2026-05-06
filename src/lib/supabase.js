@@ -881,6 +881,84 @@ export async function deleteRelationshipGroup(groupId) {
   return { success: true, error: null }
 }
 
+// ─── 領隊報到頁（公開，token 驗證）────────────────────────────
+
+/**
+ * 用車輛 access_token 取得車輛資料（含成員報到狀態）
+ * 公開頁面使用，不需登入
+ */
+export async function getCarByToken(token) {
+  const { data, error } = await supabase
+    .from('car_assignments')
+    .select(`
+      car_id, car_name, seats, event_id, sort_order,
+      events ( name, date_start ),
+      car_members (
+        registration_id,
+        registrations (
+          registration_id, answers, checked_in_at, student_id,
+          students ( name )
+        )
+      ),
+      car_leaders ( registration_id )
+    `)
+    .eq('access_token', token)
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return { car: null, error: 'NOT_FOUND' }
+    return { car: null, error: error.message }
+  }
+  return { car: data, error: null }
+}
+
+/**
+ * 用總領隊 access_token 取得活動資料
+ * 公開頁面使用，不需登入
+ */
+export async function getHeadLeaderByToken(token) {
+  const { data, error } = await supabase
+    .from('head_leader')
+    .select(`
+      id, registration_id, event_id,
+      events ( event_id, name, date_start ),
+      registrations ( answers, student_id, students ( name ) )
+    `)
+    .eq('access_token', token)
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return { headLeader: null, error: 'NOT_FOUND' }
+    return { headLeader: null, error: error.message }
+  }
+  return { headLeader: data, error: null }
+}
+
+/**
+ * 取得活動所有大車的報到進度（總領隊看板用）
+ */
+export async function getAllCarsProgress(eventId) {
+  const { data, error } = await supabase
+    .from('car_assignments')
+    .select(`
+      car_id, car_name, seats, sort_order,
+      car_leaders ( registration_id ),
+      car_members (
+        registration_id,
+        registrations (
+          registration_id, answers, checked_in_at, student_id,
+          students ( name )
+        )
+      )
+    `)
+    .eq('event_id', eventId)
+    .eq('car_type', 'large')
+    .order('sort_order', { ascending: true })
+
+  if (error) return { cars: [], error: error.message }
+  return { cars: data || [], error: null }
+}
+
 // ─── 學員管理（後台）────────────────────────────────────────
 
 export async function getAllStudents(search = '') {

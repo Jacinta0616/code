@@ -279,6 +279,8 @@ export default function CarrangementDetailPage() {
   const [headLeaderRegId, setHeadLeaderRegId] = useState('')
   const [saving,  setSaving]                = useState(false)
   const [msg,     setMsg]                   = useState('')
+  const [headLeaderToken, setHeadLeaderToken] = useState('')
+  const [copyMsg, setCopyMsg]               = useState('')
   // orphanAssignments: { [registrationId]: groupKey(小車 key) }
   const [orphanAssignments, setOrphanAssignments] = useState({})
 
@@ -348,11 +350,12 @@ export default function CarrangementDetailPage() {
       const largeSaved = savedCars.filter(c => c.car_type === 'large')
       if (largeSaved.length > 0) {
         const mapped = largeSaved.map(c => ({
-          tempId:   c.car_id,
-          car_name: c.car_name,
-          seats:    c.seats,
-          members:  (c.car_members ?? []).map(m => m.registration_id),
-          leaders:  (c.car_leaders ?? []).map(l => l.registration_id),
+          tempId:       c.car_id,
+          car_name:     c.car_name,
+          seats:        c.seats,
+          members:      (c.car_members ?? []).map(m => m.registration_id),
+          leaders:      (c.car_leaders ?? []).map(l => l.registration_id),
+          access_token: c.access_token ?? '',
         }))
         setCars(mapped)
         setCarCount(mapped.length)
@@ -379,7 +382,10 @@ export default function CarrangementDetailPage() {
       }
     }
 
-    if (headLeader) setHeadLeaderRegId(headLeader.registration_id ?? '')
+    if (headLeader) {
+      setHeadLeaderRegId(headLeader.registration_id ?? '')
+      setHeadLeaderToken(headLeader.access_token ?? '')
+    }
     setLoading(false)
   }
 
@@ -419,8 +425,22 @@ export default function CarrangementDetailPage() {
         : Promise.resolve({ success: true }),
     ])
     setSaving(false)
-    setMsg(carRes.success && hlRes.success ? '已儲存 ✓' : `儲存失敗：${carRes.error || hlRes.error}`)
+    if (carRes.success && hlRes.success) {
+      setMsg('已儲存 ✓')
+      // 儲存後重新讀取 token（每次儲存 token 會更新，連結需重新複製）
+      await load()
+    } else {
+      setMsg(`儲存失敗：${carRes.error || hlRes.error}`)
+    }
     setTimeout(() => setMsg(''), 4000)
+  }
+
+  function copyLink(token, label) {
+    const url = `${window.location.origin}/car-checkin/${token}`
+    navigator.clipboard.writeText(url).then(() => {
+      setCopyMsg(`${label} 連結已複製`)
+      setTimeout(() => setCopyMsg(''), 2500)
+    })
   }
 
   function handleExport() {
@@ -621,6 +641,19 @@ export default function CarrangementDetailPage() {
                     {car.members.length >= car.seats && (
                       <span className="text-xs text-red-500 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">已滿</span>
                     )}
+                    <div className="ml-auto shrink-0">
+                      {car.access_token ? (
+                        <button
+                          onClick={() => copyLink(car.access_token, car.car_name)}
+                          className="text-xs text-blue-600 hover:text-blue-800 hover:underline px-2 py-1 rounded hover:bg-blue-50 transition-colors"
+                          title={`複製 ${car.car_name} 領隊連結`}
+                        >
+                          🔗 複製連結
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-300">（儲存後可複製）</span>
+                      )}
+                    </div>
                   </div>
                   {/* 成員列表 */}
                   <div className="divide-y">
@@ -769,25 +802,45 @@ export default function CarrangementDetailPage() {
         {/* ── 總領隊 ── */}
         <section>
           <h2 className="text-base font-bold text-gray-700 mb-3">👑 總領隊</h2>
-          <select
-            value={headLeaderRegId}
-            onChange={e => setHeadLeaderRegId(e.target.value)}
-            className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 w-full max-w-xs"
-          >
-            <option value="">（未設定）</option>
-            {regs.map(r => {
-              const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
-              return (
-                <option key={r.registration_id} value={r.registration_id}>
-                  {getName(r)}{cls ? `　${cls}` : ''}
-                </option>
-              )
-            })}
-          </select>
+          <div className="flex items-center gap-3 flex-wrap">
+            <select
+              value={headLeaderRegId}
+              onChange={e => setHeadLeaderRegId(e.target.value)}
+              className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 w-full max-w-xs"
+            >
+              <option value="">（未設定）</option>
+              {regs.map(r => {
+                const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
+                return (
+                  <option key={r.registration_id} value={r.registration_id}>
+                    {getName(r)}{cls ? `　${cls}` : ''}
+                  </option>
+                )
+              })}
+            </select>
+            {headLeaderToken ? (
+              <button
+                onClick={() => copyLink(headLeaderToken, '總領隊')}
+                className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                🔗 複製總領隊連結
+              </button>
+            ) : (
+              <span className="text-xs text-gray-400">（儲存後可複製連結）</span>
+            )}
+          </div>
           <p className="text-xs text-gray-400 mt-2">
-            總領隊可查看所有車的報到狀況。領隊報到頁（含連結與身份驗證）將於下一批次建立。
+            總領隊看板可即時查看所有車的報到進度（各車進度條）。<br />
+            ⚠️ 每次儲存排車後 token 會更新，請重新複製連結再傳給領隊。
           </p>
         </section>
+
+        {/* 複製成功提示 */}
+        {copyMsg && (
+          <div className="fixed bottom-20 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-sm px-4 py-2 rounded-lg shadow-lg whitespace-nowrap z-50">
+            ✓ {copyMsg}
+          </div>
+        )}
 
       </div>
     </AdminLayout>

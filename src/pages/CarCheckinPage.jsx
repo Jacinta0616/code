@@ -1,0 +1,519 @@
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { useParams } from 'react-router-dom'
+import CameraScanner from '../components/CameraScanner'
+import {
+  getCarByToken,
+  getHeadLeaderByToken,
+  getAllCarsProgress,
+  checkIn,
+  uncheckIn,
+} from '../lib/supabase'
+
+// ─── 工具 ──────────────────────────────────────────────────
+
+const getMemberName = (member) =>
+  member?.registrations?.students?.name ??
+  member?.registrations?.answers?.guest_name ??
+  '訪客'
+
+const isGuest = (member) => !member?.registrations?.student_id
+
+const isCheckedIn = (member) => !!member?.registrations?.checked_in_at
+
+const formatDate = (dateStr) => {
+  if (!dateStr) return ''
+  const d = new Date(dateStr)
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+// ─── 共用：掃描訊息 ──────────────────────────────────────────
+
+function ScanToast({ msg }) {
+  if (!msg) return null
+  const isOk = msg.startsWith('✓')
+  return (
+    <div
+      className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl text-sm font-semibold shadow-lg border whitespace-nowrap ${
+        isOk
+          ? 'bg-green-100 text-green-800 border-green-300'
+          : 'bg-red-100 text-red-700 border-red-300'
+      }`}
+    >
+      {msg}
+    </div>
+  )
+}
+
+// ─── 主頁面 ───────────────────────────────────────────────
+
+export default function CarCheckinPage() {
+  const { token } = useParams()
+
+  const [loading, setLoading]     = useState(true)
+  const [mode, setMode]           = useState(null)   // 'car' | 'head' | 'invalid'
+
+  // car mode
+  const [car, setCar]             = useState(null)
+
+  // head mode
+  const [headLeader, setHeadLeader] = useState(null)
+  const [allCars, setAllCars]     = useState([])
+  const [expandedCarId, setExpandedCarId] = useState(null)
+
+  // 共用
+  const [scanMsg, setScanMsg]     = useState('')
+  const [showCamera, setShowCamera] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+
+  // 硬體掃描機
+  const scanBufRef  = useRef('')
+  const scanTimerRef = useRef(null)
+
+  // ── 載入 ──
+  useEffect(() => { load() }, [token])
+
+  async function load() {
+    setLoading(true)
+    const [carRes, hlRes] = await Promise.all([
+      getCarByToken(token),
+      getHeadLeaderByToken(token),
+    ])
+
+    if (carRes.car) {
+      setMode('car')
+      setCar(carRes.car)
+    } else if (hlRes.headLeader) {
+      setMode('head')
+      setHeadLeader(hlRes.headLeader)
+      const eventId = hlRes.headLeader.events?.event_id ?? hlRes.headLeader.event_id
+      const { cars } = await getAllCarsProgress(eventId)
+      setAllCars(cars)
+    } else {
+      setMode('invalid')
+    }
+    setLoading(false)
+  }
+
+  // ── 重新整理 ──
+  const refresh = useCallback(async () => {
+    setRefreshing(true)
+    if (mode === 'car') {
+      const { car: updated } = await getCarByToken(token)
+      if (updated) setCar(updated)
+    } else if (mode === 'head') {
+      const eventId = headLeader?.events?.event_id ?? headLeader?.event_id
+      const { cars } = await getAllCarsProgress(eventId)
+      setAllCars(cars)
+    }
+    setRefreshing(false)
+  }, [mode, token, headLeader])
+
+  // ── 自動每 30 秒重新整理 ──
+  useEffect(() => {
+    if (!mode || mode === 'invalid' || mode === 'loading') return
+    const id = setInterval(refresh, 30_000)
+    return () => clearInterval(id)
+  }, [mode, refresh])
+
+  // ── 硬體掃描機監聽 ──
+  useEffect(() => {
+    function handleKeyPress(e) {
+      if (showCamera) return
+      if (e.key === 'Enter') {
+        const code = scanBufRef.current.trim()
+        scanBufRef.current = ''
+        clearTimeout(scanTimerRef.current)
+        if (code) handleScanCode(code)
+      } else if (e.key.length === 1) {
+        scanBufRef.current += e.key
+        clearTimeout(scanTimerRef.current)
+        scanTimerRef.current = setTimeout(() => { scanBufRef.current = '' }, 300)
+      }
+    }
+    window.addEventListener('keypress', handleKeyPress)
+    return () => window.removeEventListener('keypress', handleKeyPress)
+  }, [mode, car, allCars, showCamera])
+
+  // ── 掃描處理 ──
+  async function handleScanCode(code) {
+    let found = null
+    let foundCar = null
+
+    if (mode === 'car' && car) {
+      found = (car.car_members ?? []).find(
+        m => m.registrations?.student_id === code || m.registration_id === code
+      )
+      if (found) foundCar = car
+    } else if (mode === 'head') {
+      for (const c of allCars) {
+        found = (c.car_members ?? []).find(
+          m => m.registrations?.student_id === code || m.registration_id === code
+        )
+        if (found) { foundCar = c; break }
+      }
+    }
+
+    if (!found) {
+      showMsg('找不到此學員（不在本車名單內）')
+      return
+    }
+
+    const name = getMemberName(found)
+    await checkIn(found.registration_id)
+    showMsg(`✓ ${name} 報到完成`)
+    await refresh()
+  }
+
+  function showMsg(text, ms = 3000) {
+    setScanMsg(text)
+    setTimeout(() => setScanMsg(''), ms)
+  }
+
+  // ── 手動點選報到 ──
+  async function handleToggleCheckin(registrationId, checkedAt) {
+    if (checkedAt) {
+      await uncheckIn(registrationId)
+    } else {
+      await checkIn(registrationId)
+    }
+    await refresh()
+  }
+
+  // ── 畫面 ──
+
+  if (loading) return (
+    <div className="min-h-screen bg-amber-50 flex items-center justify-center">
+      <div className="text-amber-700 text-xl animate-pulse">載入中…</div>
+    </div>
+  )
+
+  if (mode === 'invalid') return (
+    <div className="min-h-screen bg-amber-50 flex items-center justify-center p-8">
+      <div className="text-center">
+        <div className="text-5xl mb-4">🔒</div>
+        <div className="text-xl font-semibold text-gray-700 mb-2">連結無效或已過期</div>
+        <div className="text-gray-500 text-sm">請向師父索取正確的報到連結</div>
+      </div>
+    </div>
+  )
+
+  // ════════════════════════════════════════
+  //  大車領隊模式
+  // ════════════════════════════════════════
+
+  if (mode === 'car' && car) {
+    const members       = car.car_members ?? []
+    const checkedIn     = members.filter(isCheckedIn).length
+    const total         = members.length
+    const eventName     = car.events?.name ?? ''
+    const eventDate     = formatDate(car.events?.date_start)
+    const pct           = total > 0 ? Math.round((checkedIn / total) * 100) : 0
+
+    // 未報到在前、已報到在後
+    const sorted = [...members].sort((a, b) => {
+      const ai = isCheckedIn(a) ? 1 : 0
+      const bi = isCheckedIn(b) ? 1 : 0
+      return ai - bi
+    })
+
+    return (
+      <div className="min-h-screen bg-amber-50 pb-24">
+        <ScanToast msg={scanMsg} />
+
+        {/* Header */}
+        <div className="bg-amber-700 text-white px-4 py-5 shadow-md">
+          <div className="max-w-lg mx-auto">
+            <div className="text-xs opacity-75 mb-0.5">{eventName}　{eventDate}</div>
+            <div className="text-xl font-bold">{car.car_name} 報到</div>
+            <div className="flex items-end gap-2 mt-3">
+              <span className="text-4xl font-bold leading-none">{checkedIn}</span>
+              <span className="text-base opacity-75 pb-0.5">/ {total} 人　{pct}%</span>
+            </div>
+            <div className="mt-2 bg-white/30 rounded-full h-2.5">
+              <div
+                className="bg-white rounded-full h-2.5 transition-all duration-500"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 掃描按鈕 */}
+        <div className="px-4 pt-4 max-w-lg mx-auto">
+          <button
+            onClick={() => setShowCamera(true)}
+            className="w-full py-3 bg-white border-2 border-amber-400 rounded-xl text-amber-700 font-semibold text-sm hover:bg-amber-50 active:bg-amber-100 transition-colors shadow-sm"
+          >
+            📷 用相機掃描學員證
+          </button>
+          <p className="text-center text-xs text-gray-400 mt-1.5">
+            硬體掃描機直接對著螢幕掃即可
+          </p>
+        </div>
+
+        {/* 成員清單 */}
+        <div className="px-4 pt-3 max-w-lg mx-auto space-y-2">
+          {sorted.map(member => {
+            const name       = getMemberName(member)
+            const guest      = isGuest(member)
+            const checked    = isCheckedIn(member)
+            const isLeader   = (car.car_leaders ?? []).some(
+              l => l.registration_id === member.registration_id
+            )
+
+            return (
+              <div
+                key={member.registration_id}
+                className={`flex items-center gap-3 bg-white rounded-xl px-4 py-3 shadow-sm border transition-opacity ${
+                  checked ? 'border-green-200 opacity-60' : 'border-gray-200'
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className={`font-medium truncate ${checked ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+                      {name}
+                    </span>
+                    {isLeader && (
+                      <span className="text-xs bg-amber-100 text-amber-700 border border-amber-200 rounded-full px-1.5 shrink-0">
+                        領隊
+                      </span>
+                    )}
+                    {guest && (
+                      <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">
+                        訪客
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
+                  className={`shrink-0 px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${
+                    checked
+                      ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'
+                      : 'bg-green-600 text-white hover:bg-green-700 active:bg-green-800'
+                  }`}
+                >
+                  {checked ? '已到' : '報到'}
+                </button>
+              </div>
+            )
+          })}
+
+          {members.length === 0 && (
+            <div className="text-center text-gray-400 py-12 text-sm">此車目前無成員</div>
+          )}
+        </div>
+
+        {/* 重新整理按鈕 */}
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="fixed bottom-6 right-4 w-12 h-12 bg-white border shadow-lg rounded-full flex items-center justify-center text-lg text-gray-500 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-40 transition-all"
+          title="重新整理"
+        >
+          {refreshing ? '…' : '🔄'}
+        </button>
+
+        {/* 相機 */}
+        {showCamera && (
+          <CameraScanner
+            onScan={code => { setShowCamera(false); handleScanCode(code) }}
+            onClose={() => setShowCamera(false)}
+          />
+        )}
+      </div>
+    )
+  }
+
+  // ════════════════════════════════════════
+  //  總領隊模式
+  // ════════════════════════════════════════
+
+  if (mode === 'head') {
+    const eventName  = headLeader?.events?.name ?? ''
+    const eventDate  = formatDate(headLeader?.events?.date_start)
+    const totalAll   = allCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
+    const checkedAll = allCars.reduce(
+      (s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0
+    )
+    const pctAll = totalAll > 0 ? Math.round((checkedAll / totalAll) * 100) : 0
+
+    return (
+      <div className="min-h-screen bg-amber-50 pb-24">
+        <ScanToast msg={scanMsg} />
+
+        {/* Header */}
+        <div className="bg-amber-800 text-white px-4 py-5 shadow-md">
+          <div className="max-w-lg mx-auto">
+            <div className="text-xs opacity-75 mb-0.5">{eventName}　{eventDate}</div>
+            <div className="text-xl font-bold">👑 總領隊看板</div>
+            <div className="flex items-end gap-2 mt-3">
+              <span className="text-4xl font-bold leading-none">{checkedAll}</span>
+              <span className="text-base opacity-75 pb-0.5">/ {totalAll} 人　{pctAll}%</span>
+            </div>
+            <div className="mt-2 bg-white/30 rounded-full h-2.5">
+              <div
+                className="bg-white rounded-full h-2.5 transition-all duration-500"
+                style={{ width: `${pctAll}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 全域掃描按鈕 */}
+        <div className="px-4 pt-4 max-w-lg mx-auto">
+          <button
+            onClick={() => setShowCamera(true)}
+            className="w-full py-3 bg-white border-2 border-amber-400 rounded-xl text-amber-700 font-semibold text-sm hover:bg-amber-50 active:bg-amber-100 transition-colors shadow-sm"
+          >
+            📷 掃描報到（全車通用）
+          </button>
+          <p className="text-center text-xs text-gray-400 mt-1.5">
+            掃任何車的學員，系統自動找到並報到
+          </p>
+        </div>
+
+        {/* 各車卡片 */}
+        <div className="px-4 pt-3 max-w-lg mx-auto space-y-3">
+          {allCars.map(c => {
+            const total     = c.car_members?.length ?? 0
+            const checked   = (c.car_members ?? []).filter(isCheckedIn).length
+            const pct       = total > 0 ? Math.round((checked / total) * 100) : 0
+            const done      = checked === total && total > 0
+            const expanded  = expandedCarId === c.car_id
+
+            // 領隊姓名
+            const leaderNames = (c.car_leaders ?? []).map(l => {
+              const m = (c.car_members ?? []).find(m => m.registration_id === l.registration_id)
+              return getMemberName(m)
+            }).filter(Boolean)
+
+            // 成員排序：未報到在前
+            const sorted = [...(c.car_members ?? [])].sort((a, b) => {
+              const ai = isCheckedIn(a) ? 1 : 0
+              const bi = isCheckedIn(b) ? 1 : 0
+              return ai - bi
+            })
+
+            return (
+              <div
+                key={c.car_id}
+                className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden"
+              >
+                {/* 車次標題列（點擊展開/收合） */}
+                <button
+                  onClick={() => setExpandedCarId(expanded ? null : c.car_id)}
+                  className="w-full px-4 py-3.5 flex items-center gap-3 text-left hover:bg-gray-50 active:bg-gray-100 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800">{c.car_name}</span>
+                      {done && (
+                        <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-1.5">
+                          全員到齊 ✓
+                        </span>
+                      )}
+                    </div>
+                    {leaderNames.length > 0 && (
+                      <div className="text-xs text-amber-600 mt-0.5">
+                        領隊：{leaderNames.join('、')}
+                      </div>
+                    )}
+                    {/* 進度條 */}
+                    <div className="flex items-center gap-2 mt-2">
+                      <div className="flex-1 bg-gray-100 rounded-full h-2">
+                        <div
+                          className={`rounded-full h-2 transition-all duration-500 ${
+                            done ? 'bg-green-500' : 'bg-amber-500'
+                          }`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <span className={`text-sm font-semibold shrink-0 ${done ? 'text-green-600' : 'text-amber-700'}`}>
+                        {checked} / {total}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-gray-300 text-xs ml-1 shrink-0">
+                    {expanded ? '▲' : '▼'}
+                  </span>
+                </button>
+
+                {/* 展開：成員清單 */}
+                {expanded && (
+                  <div className="border-t">
+                    <div className="divide-y">
+                      {sorted.map(member => {
+                        const name     = getMemberName(member)
+                        const guest    = isGuest(member)
+                        const chk      = isCheckedIn(member)
+                        const isLeader = (c.car_leaders ?? []).some(
+                          l => l.registration_id === member.registration_id
+                        )
+
+                        return (
+                          <div
+                            key={member.registration_id}
+                            className={`flex items-center gap-3 px-4 py-2.5 ${chk ? 'opacity-55' : ''}`}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>
+                                  {name}
+                                </span>
+                                {isLeader && (
+                                  <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>
+                                )}
+                                {guest && (
+                                  <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>
+                                )}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
+                              className={`shrink-0 px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                                chk
+                                  ? 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-500'
+                                  : 'bg-green-600 text-white hover:bg-green-700'
+                              }`}
+                            >
+                              {chk ? '已到' : '報到'}
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
+          {allCars.length === 0 && (
+            <div className="text-center text-gray-400 py-12 text-sm">尚無排車資料，請師父先完成排車並儲存</div>
+          )}
+        </div>
+
+        {/* 重新整理按鈕 */}
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="fixed bottom-6 right-4 w-12 h-12 bg-white border shadow-lg rounded-full flex items-center justify-center text-lg text-gray-500 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-40 transition-all"
+          title="重新整理"
+        >
+          {refreshing ? '…' : '🔄'}
+        </button>
+
+        {/* 相機 */}
+        {showCamera && (
+          <CameraScanner
+            onScan={code => { setShowCamera(false); handleScanCode(code) }}
+            onClose={() => setShowCamera(false)}
+          />
+        )}
+      </div>
+    )
+  }
+
+  return null
+}

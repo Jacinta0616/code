@@ -13,6 +13,7 @@ import RelationshipsPage from './pages/admin/RelationshipsPage'
 import CarrangementPage from './pages/admin/CarrangementPage'
 import CarrangementDetailPage from './pages/admin/CarrangementDetailPage'
 import CarCheckinPage from './pages/CarCheckinPage'
+import LeaderScanPage from './pages/LeaderScanPage'
 
 export default function App() {
   return (
@@ -51,6 +52,9 @@ export default function App() {
           <Route path="/admin/carrangement/:eventId" element={
             <ProtectedRoute adminOnly><CarrangementDetailPage /></ProtectedRoute>
           } />
+
+          {/* 公開：領隊掃卡入口（刷學員證自動跳轉） */}
+          <Route path="/leader" element={<LeaderScanPage />} />
 
           {/* 公開：領隊報到頁（不需登入，用 token 驗身） */}
           <Route path="/car-checkin/:token" element={<CarCheckinPage />} />

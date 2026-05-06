@@ -769,13 +769,32 @@ export async function saveCarArrangement(eventId, largeCars, smallGroups = []) {
 }
 
 /**
- * 取得活動的總領隊
+ * 取得活動的總領隊（type = 'all'）
  */
 export async function getHeadLeader(eventId) {
   const { data, error } = await supabase
     .from('head_leader')
     .select('registration_id, access_token')
     .eq('event_id', eventId)
+    .eq('type', 'all')
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return { headLeader: null, error: null }
+    return { headLeader: null, error: error.message }
+  }
+  return { headLeader: data, error: null }
+}
+
+/**
+ * 取得活動的小車領隊（type = 'small_car'）
+ */
+export async function getSmallCarLeader(eventId) {
+  const { data, error } = await supabase
+    .from('head_leader')
+    .select('registration_id, access_token')
+    .eq('event_id', eventId)
+    .eq('type', 'small_car')
     .single()
 
   if (error) {
@@ -791,7 +810,25 @@ export async function getHeadLeader(eventId) {
 export async function setHeadLeader(eventId, registrationId) {
   const { error } = await supabase
     .from('head_leader')
-    .upsert({ event_id: eventId, registration_id: registrationId }, { onConflict: 'event_id' })
+    .upsert(
+      { event_id: eventId, registration_id: registrationId, type: 'all' },
+      { onConflict: 'event_id,type' }
+    )
+
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
+/**
+ * 設定（或更新）活動的小車領隊
+ */
+export async function setSmallCarLeader(eventId, registrationId) {
+  const { error } = await supabase
+    .from('head_leader')
+    .upsert(
+      { event_id: eventId, registration_id: registrationId, type: 'small_car' },
+      { onConflict: 'event_id,type' }
+    )
 
   if (error) return { success: false, error: error.message }
   return { success: true, error: null }
@@ -920,7 +957,7 @@ export async function getHeadLeaderByToken(token) {
   const { data, error } = await supabase
     .from('head_leader')
     .select(`
-      id, registration_id, event_id,
+      id, registration_id, event_id, type,
       events ( event_id, name, date_start ),
       registrations ( answers, student_id, students ( name ) )
     `)
@@ -935,13 +972,13 @@ export async function getHeadLeaderByToken(token) {
 }
 
 /**
- * 取得活動所有大車的報到進度（總領隊看板用）
+ * 取得活動所有車的報到進度（總領隊看板用，大車＋小車）
  */
 export async function getAllCarsProgress(eventId) {
   const { data, error } = await supabase
     .from('car_assignments')
     .select(`
-      car_id, car_name, seats, sort_order,
+      car_id, car_name, seats, sort_order, car_type,
       car_leaders ( registration_id ),
       car_members (
         registration_id,
@@ -952,11 +989,101 @@ export async function getAllCarsProgress(eventId) {
       )
     `)
     .eq('event_id', eventId)
-    .eq('car_type', 'large')
+    .order('car_type', { ascending: false })   // large 排前面
     .order('sort_order', { ascending: true })
 
   if (error) return { cars: [], error: error.message }
   return { cars: data || [], error: null }
+}
+
+/**
+ * 取得活動所有小車的報到進度（小車領隊看板用）
+ */
+export async function getAllSmallCarsProgress(eventId) {
+  const { data, error } = await supabase
+    .from('car_assignments')
+    .select(`
+      car_id, car_name, seats, sort_order, car_type,
+      car_leaders ( registration_id ),
+      car_members (
+        registration_id,
+        registrations (
+          registration_id, answers, checked_in_at, student_id,
+          students ( name )
+        )
+      )
+    `)
+    .eq('event_id', eventId)
+    .eq('car_type', 'small')
+    .order('sort_order', { ascending: true })
+
+  if (error) return { cars: [], error: error.message }
+  return { cars: data || [], error: null }
+}
+
+/**
+ * 根據學員 QR code（student_id）找出該學員在有效活動中的領隊角色
+ * 用於 /leader 掃卡入口頁
+ * 回傳 roles 陣列，每筆包含 { type, token, eventId, eventName, carName? }
+ */
+export async function findLeaderByStudentId(studentId) {
+  // Step 1：找出該學員的所有 registration_id
+  const { data: regData, error: regErr } = await supabase
+    .from('registrations')
+    .select('registration_id, event_id')
+    .eq('student_id', studentId)
+
+  if (regErr || !regData?.length) return { roles: [] }
+
+  const regIds = regData.map(r => r.registration_id)
+
+  // Step 2：查是否為某台大車的領隊
+  const { data: carLeaderData } = await supabase
+    .from('car_leaders')
+    .select(`
+      registration_id,
+      car_assignments (
+        car_name, access_token, car_type,
+        events ( event_id, name, status )
+      )
+    `)
+    .in('registration_id', regIds)
+
+  // Step 3：查是否為總領隊或小車領隊
+  const { data: headLeaderData } = await supabase
+    .from('head_leader')
+    .select(`
+      registration_id, type, access_token,
+      events ( event_id, name, status )
+    `)
+    .in('registration_id', regIds)
+
+  const roles = []
+
+  for (const cl of carLeaderData || []) {
+    const car = cl.car_assignments
+    if (!car || car.events?.status !== 'active') continue
+    roles.push({
+      type: 'car',
+      token: car.access_token,
+      eventId: car.events.event_id,
+      eventName: car.events.name,
+      carName: car.car_name,
+    })
+  }
+
+  for (const hl of headLeaderData || []) {
+    if (hl.events?.status !== 'active') continue
+    roles.push({
+      type: hl.type,           // 'all' or 'small_car'
+      token: hl.access_token,
+      eventId: hl.events.event_id,
+      eventName: hl.events.name,
+      carName: null,
+    })
+  }
+
+  return { roles }
 }
 
 // ─── 學員管理（後台）────────────────────────────────────────

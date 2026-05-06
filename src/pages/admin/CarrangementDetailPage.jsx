@@ -9,6 +9,8 @@ import {
   saveCarArrangement,
   getHeadLeader,
   setHeadLeader as saveHeadLeader,
+  getSmallCarLeader,
+  setSmallCarLeader as saveSmallCarLeader,
 } from '../../lib/supabase'
 
 // ─── 常數與工具 ───────────────────────────────────────────────
@@ -277,9 +279,11 @@ export default function CarrangementDetailPage() {
   const [carCount, setCarCount]             = useState(2)
   const [seatsPerCar, setSeatsPerCar]       = useState(20)
   const [headLeaderRegId, setHeadLeaderRegId] = useState('')
+  const [headLeaderToken, setHeadLeaderToken] = useState('')
+  const [smallCarLeaderRegId, setSmallCarLeaderRegId] = useState('')
+  const [smallCarLeaderToken, setSmallCarLeaderToken] = useState('')
   const [saving,  setSaving]                = useState(false)
   const [msg,     setMsg]                   = useState('')
-  const [headLeaderToken, setHeadLeaderToken] = useState('')
   const [copyMsg, setCopyMsg]               = useState('')
   // orphanAssignments: { [registrationId]: groupKey(小車 key) }
   const [orphanAssignments, setOrphanAssignments] = useState({})
@@ -333,12 +337,13 @@ export default function CarrangementDetailPage() {
 
   async function load() {
     setLoading(true)
-    const [{ events }, { registrations }, { groups }, { cars: savedCars }, { headLeader }] = await Promise.all([
+    const [{ events }, { registrations }, { groups }, { cars: savedCars }, { headLeader }, { headLeader: smallCarLeader }] = await Promise.all([
       getAllEvents(),
       getEventRegistrationsDetail(eventId),
       getRelationshipGroups(),
       getCarArrangement(eventId),
       getHeadLeader(eventId),
+      getSmallCarLeader(eventId),
     ])
 
     setEvent(events.find(e => e.event_id === eventId) ?? null)
@@ -386,6 +391,10 @@ export default function CarrangementDetailPage() {
       setHeadLeaderRegId(headLeader.registration_id ?? '')
       setHeadLeaderToken(headLeader.access_token ?? '')
     }
+    if (smallCarLeader) {
+      setSmallCarLeaderRegId(smallCarLeader.registration_id ?? '')
+      setSmallCarLeaderToken(smallCarLeader.access_token ?? '')
+    }
     setLoading(false)
   }
 
@@ -418,19 +427,22 @@ export default function CarrangementDetailPage() {
 
   async function handleSave() {
     setSaving(true); setMsg('')
-    const [carRes, hlRes] = await Promise.all([
+    const [carRes, hlRes, sclRes] = await Promise.all([
       saveCarArrangement(eventId, cars, finalSmallGroups),
       headLeaderRegId
         ? saveHeadLeader(eventId, headLeaderRegId)
         : Promise.resolve({ success: true }),
+      smallCarLeaderRegId
+        ? saveSmallCarLeader(eventId, smallCarLeaderRegId)
+        : Promise.resolve({ success: true }),
     ])
     setSaving(false)
-    if (carRes.success && hlRes.success) {
+    if (carRes.success && hlRes.success && sclRes.success) {
       setMsg('已儲存 ✓')
       // 儲存後重新讀取 token（每次儲存 token 會更新，連結需重新複製）
       await load()
     } else {
-      setMsg(`儲存失敗：${carRes.error || hlRes.error}`)
+      setMsg(`儲存失敗：${carRes.error || hlRes.error || sclRes.error}`)
     }
     setTimeout(() => setMsg(''), 4000)
   }
@@ -799,6 +811,44 @@ export default function CarrangementDetailPage() {
           </section>
         )}
 
+        {/* ── 小車領隊 ── */}
+        {smallPeople.length > 0 && (
+          <section>
+            <h2 className="text-base font-bold text-gray-700 mb-3">🚗 小車領隊</h2>
+            <div className="flex items-center gap-3 flex-wrap">
+              <select
+                value={smallCarLeaderRegId}
+                onChange={e => setSmallCarLeaderRegId(e.target.value)}
+                className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400 w-full max-w-xs"
+              >
+                <option value="">（未設定）</option>
+                {regs.map(r => {
+                  const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
+                  return (
+                    <option key={r.registration_id} value={r.registration_id}>
+                      {getName(r)}{cls ? `　${cls}` : ''}
+                    </option>
+                  )
+                })}
+              </select>
+              {smallCarLeaderToken ? (
+                <button
+                  onClick={() => copyLink(smallCarLeaderToken, '小車領隊')}
+                  className="px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
+                >
+                  🔗 複製小車領隊連結
+                </button>
+              ) : (
+                <span className="text-xs text-gray-400">（儲存後可複製連結）</span>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 mt-2">
+              小車領隊可查看並操作所有小車成員的報到狀況。<br />
+              ⚠️ 每次儲存後連結會更新，請重新複製。
+            </p>
+          </section>
+        )}
+
         {/* ── 總領隊 ── */}
         <section>
           <h2 className="text-base font-bold text-gray-700 mb-3">👑 總領隊</h2>
@@ -830,7 +880,7 @@ export default function CarrangementDetailPage() {
             )}
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            總領隊看板可即時查看所有車的報到進度（各車進度條）。<br />
+            總領隊看板可即時查看所有大車＋小車的報到進度。<br />
             ⚠️ 每次儲存排車後 token 會更新，請重新複製連結再傳給領隊。
           </p>
         </section>

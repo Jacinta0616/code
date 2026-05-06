@@ -28,6 +28,23 @@ const formatDate = (dateStr) => {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
 
+// 判斷是否提前上山（任一答案日期早於活動起始日）
+// 回傳 "X月X日已上山" 字串，或 null
+function getPreArriveInfo(answers, eventDateStart) {
+  if (!answers || !eventDateStart) return null
+  const eventDate = eventDateStart.slice(0, 10) // 'YYYY-MM-DD'
+  for (const val of Object.values(answers)) {
+    if (typeof val !== 'string') continue
+    const m = val.match(/^(\d{4}-\d{2}-\d{2})/)
+    if (!m) continue
+    if (m[1] < eventDate) {
+      const d = new Date(m[1] + 'T00:00:00')
+      return `${d.getMonth() + 1}月${d.getDate()}日已上山`
+    }
+  }
+  return null
+}
+
 // ─── 共用：掃描訊息 ──────────────────────────────────────────
 
 function ScanToast({ msg }) {
@@ -84,7 +101,19 @@ export default function CarCheckinPage() {
 
     if (carRes.car) {
       setMode('car')
-      setCar(carRes.car)
+      // 提前上山者自動標記為已報到（靜默執行）
+      const dateStart = carRes.car.events?.date_start
+      const toAutoCheck = (carRes.car.car_members ?? []).filter(m =>
+        !m.registrations?.checked_in_at &&
+        getPreArriveInfo(m.registrations?.answers, dateStart)
+      )
+      if (toAutoCheck.length > 0) {
+        await Promise.all(toAutoCheck.map(m => checkIn(m.registration_id)))
+        const { car: fresh } = await getCarByToken(token)
+        setCar(fresh ?? carRes.car)
+      } else {
+        setCar(carRes.car)
+      }
     } else if (hlRes.headLeader) {
       const leaderType = hlRes.headLeader.type ?? 'all'
       setMode(leaderType === 'small_car' ? 'small_car' : 'head')
@@ -93,7 +122,21 @@ export default function CarCheckinPage() {
       const { cars } = leaderType === 'small_car'
         ? await getAllSmallCarsProgress(eventId)
         : await getAllCarsProgress(eventId)
-      setAllCars(cars)
+      // 提前上山者自動標記為已報到（靜默執行）
+      const dateStart = hlRes.headLeader.events?.date_start
+      const toAutoCheck = (cars ?? []).flatMap(c => c.car_members ?? []).filter(m =>
+        !m.registrations?.checked_in_at &&
+        getPreArriveInfo(m.registrations?.answers, dateStart)
+      )
+      if (toAutoCheck.length > 0) {
+        await Promise.all(toAutoCheck.map(m => checkIn(m.registration_id)))
+        const { cars: fresh } = leaderType === 'small_car'
+          ? await getAllSmallCarsProgress(eventId)
+          : await getAllCarsProgress(eventId)
+        setAllCars(fresh ?? cars)
+      } else {
+        setAllCars(cars)
+      }
     } else {
       setMode('invalid')
     }
@@ -213,10 +256,11 @@ export default function CarCheckinPage() {
 
   if (mode === 'car' && car) {
     const members       = car.car_members ?? []
+    const dateStart     = car.events?.date_start
     const checkedIn     = members.filter(isCheckedIn).length
     const total         = members.length
     const eventName     = car.events?.name ?? ''
-    const eventDate     = formatDate(car.events?.date_start)
+    const eventDate     = formatDate(dateStart)
     const pct           = total > 0 ? Math.round((checkedIn / total) * 100) : 0
 
     // 未報到在前、已報到在後
@@ -293,6 +337,11 @@ export default function CarCheckinPage() {
                         訪客
                       </span>
                     )}
+                    {getPreArriveInfo(member.registrations?.answers, dateStart) && (
+                      <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">
+                        {getPreArriveInfo(member.registrations?.answers, dateStart)}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
@@ -341,7 +390,8 @@ export default function CarCheckinPage() {
 
   if (mode === 'small_car') {
     const eventName  = headLeader?.events?.name ?? ''
-    const eventDate  = formatDate(headLeader?.events?.date_start)
+    const dateStart  = headLeader?.events?.date_start
+    const eventDate  = formatDate(dateStart)
     const totalAll   = allCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
     const checkedAll = allCars.reduce(
       (s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0
@@ -409,14 +459,16 @@ export default function CarCheckinPage() {
                 {/* 成員清單（常駐顯示，不需展開） */}
                 <div className="divide-y">
                   {members.map(member => {
-                    const name  = getMemberName(member)
-                    const guest = isGuest(member)
-                    const chk   = isCheckedIn(member)
+                    const name   = getMemberName(member)
+                    const guest  = isGuest(member)
+                    const chk    = isCheckedIn(member)
+                    const preArr = getPreArriveInfo(member.registrations?.answers, dateStart)
                     return (
                       <div key={member.registration_id} className={`flex items-center gap-3 px-4 py-2.5 ${chk ? 'opacity-50' : ''}`}>
                         <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
                           <span className={`text-sm ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
-                          {guest && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                          {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                          {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
                         </div>
                         <button
                           onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
@@ -457,7 +509,8 @@ export default function CarCheckinPage() {
 
   if (mode === 'head') {
     const eventName  = headLeader?.events?.name ?? ''
-    const eventDate  = formatDate(headLeader?.events?.date_start)
+    const dateStart  = headLeader?.events?.date_start
+    const eventDate  = formatDate(dateStart)
 
     const largeCars = allCars.filter(c => c.car_type === 'large')
     const smallCars = allCars.filter(c => c.car_type === 'small')
@@ -468,6 +521,22 @@ export default function CarCheckinPage() {
 
     const smallTotal   = smallCars.reduce((s, c) => s + (c.car_members?.length ?? 0), 0)
     const smallChecked = smallCars.reduce((s, c) => s + (c.car_members?.filter(isCheckedIn).length ?? 0), 0)
+
+    // 已報到人數依身份別統計
+    const identityCounts = {}
+    for (const c of allCars) {
+      for (const m of (c.car_members ?? [])) {
+        if (isCheckedIn(m)) {
+          const id = m.registrations?.answers?.identity ?? '未填'
+          identityCounts[id] = (identityCounts[id] ?? 0) + 1
+        }
+      }
+    }
+    const IDENTITY_ORDER = ['法師', '義工', '信眾']
+    const identityStats = [
+      ...IDENTITY_ORDER.filter(k => identityCounts[k]).map(k => [k, identityCounts[k]]),
+      ...Object.entries(identityCounts).filter(([k]) => !IDENTITY_ORDER.includes(k)),
+    ]
 
     return (
       <div className="min-h-screen bg-amber-50 pb-24">
@@ -483,6 +552,14 @@ export default function CarCheckinPage() {
               <span>已到 <strong className="text-xl">{checkedAll}</strong></span>
               <span>未到 <strong className="text-xl">{uncheckedAll}</strong></span>
             </div>
+            {identityStats.length > 0 && (
+              <div className="flex gap-4 mt-1.5 text-sm flex-wrap opacity-80">
+                {identityStats.map(([label, count]) => (
+                  <span key={label}>{label} <strong>{count}</strong></span>
+                ))}
+                <span className="text-xs opacity-60 self-center">（已報到）</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -550,6 +627,11 @@ export default function CarCheckinPage() {
                             <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
                             {isLeader && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>}
                             {guest    && <span className="text-xs bg-blue-100  text-blue-600  rounded-full px-1.5 shrink-0">訪客</span>}
+                            {getPreArriveInfo(member.registrations?.answers, dateStart) && (
+                              <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">
+                                {getPreArriveInfo(member.registrations?.answers, dateStart)}
+                              </span>
+                            )}
                           </div>
                           <button
                             onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
@@ -630,11 +712,13 @@ export default function CarCheckinPage() {
                               const name  = getMemberName(member)
                               const guest = isGuest(member)
                               const chk   = isCheckedIn(member)
+                              const preArr = getPreArriveInfo(member.registrations?.answers, dateStart)
                               return (
                                 <div key={member.registration_id} className={`flex items-center gap-3 px-5 py-2.5 ${chk ? 'opacity-55' : ''}`}>
                                   <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
                                     <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
-                                    {guest && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                                    {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                                    {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
                                   </div>
                                   <button
                                     onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}

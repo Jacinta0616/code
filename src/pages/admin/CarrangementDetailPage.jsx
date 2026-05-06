@@ -37,17 +37,21 @@ function findGuestMatch(note, studentRegs) {
   return null
 }
 
-// 判斷交通方式
-// isLargeCar 接受完整 reg 物件（需判斷是否為訪客）
-const isLargeCar = r => {
-  const t = r.answers?.transport_up ?? ''
-  if (r.student_id) return t.includes('精舍')
-  // 訪客：沒有明確選「自行開車」或「搭學員」的，視為搭大車
-  return !t.includes('自行開車') && !t.includes('搭學員')
-}
+// 判斷交通方式（先定義小車判斷函式，isLargeCar 再用）
 const isSmallDriver   = ans => (ans?.transport_up ?? '').includes('自行開車')
 const isSmallPassenger= ans => (ans?.transport_up ?? '').includes('搭學員')
 const isSmallCar      = ans => isSmallDriver(ans) || isSmallPassenger(ans)
+
+// isLargeCar 接受完整 reg 物件；訪客與學員邏輯一致
+// - 有選「自行開車」或「搭學員」→ 小車（不管是否訪客）
+// - 有選「精舍」→ 大車
+// - 未填 → 訪客預設大車；學員算「其他/未填」
+const isLargeCar = r => {
+  if (isSmallDriver(r.answers) || isSmallPassenger(r.answers)) return false
+  const t = r.answers?.transport_up ?? ''
+  if (r.student_id) return t.includes('精舍')
+  return true  // 訪客未填 → 預設大車
+}
 
 // ─── 小車配對（純運算，不存 DB）────────────────────────────────
 // 回傳 { matchedGroups, orphans }
@@ -139,13 +143,15 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     return a.groupName.localeCompare(b.groupName, 'zh-TW')
   })
 
-  // 整群塞入：塞不下就移到下一台車（保持組別完整）
+  // 逐人排入：嚴格不超過座位數，座位滿了移到下一台車（同班同組盡量同車，但不強制）
   let ci = 0
   for (const group of sortedGroups) {
-    // 往後找到能容納整群的車
-    while (ci < carCount - 1 && cars[ci].members.length + group.members.length > cars[ci].seats) ci++
-    // 塞入（若單群超過一整台車容量，超過也強制排入）
-    for (const rid of group.members) { cars[ci].members.push(rid); assigned.add(rid) }
+    for (const rid of group.members) {
+      // 找到有空位的車（不超過座位數）
+      while (ci < carCount - 1 && cars[ci].members.length >= cars[ci].seats) ci++
+      cars[ci].members.push(rid)
+      assigned.add(rid)
+    }
   }
 
   // 處理訪客：有備註且能配對到學員 → 強制排同車（超過座位也排）

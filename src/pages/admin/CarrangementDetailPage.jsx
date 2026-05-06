@@ -156,17 +156,34 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     }
   }
 
-  // 處理訪客：有備註且能配對到學員 → 強制排同車（超過座位也排）
+  // 處理訪客：有備註且能配對到學員 → 盡量排同車，但不超過座位數
+  // 若該車已滿，整組（訪客＋親友）一起搬到有空位的車
   // 沒備註或找不到學員 → 留在未分配警示區
   const studentLarge = largePeople.filter(r => r.student_id)
   for (const guest of largePeople.filter(r => !r.student_id && !assigned.has(r.registration_id))) {
     const note    = getGuestNote(guest)
     const matched = findGuestMatch(note, studentLarge)
     if (matched) {
-      const targetCar = cars.find(c => c.members.includes(matched.registration_id))
-      if (targetCar) {
-        // 強制插入，確保親友同車（不受座位限制）
-        targetCar.members.push(guest.registration_id)
+      const currentCar = cars.find(c => c.members.includes(matched.registration_id))
+      if (currentCar) {
+        if (currentCar.members.length < currentCar.seats) {
+          // 車還有空位，直接把訪客塞進去
+          currentCar.members.push(guest.registration_id)
+        } else {
+          // 車已滿：找可以容納 2 人的車（訪客＋親友一起搬）
+          const carsWithRoom = cars.filter(c => c !== currentCar && c.members.length + 2 <= c.seats)
+          const targetCar = carsWithRoom.length > 0
+            // 優先選剩餘空位剛好夠的車（不浪費空間）
+            ? carsWithRoom.reduce((a, b) => (a.seats - a.members.length) <= (b.seats - b.members.length) ? a : b)
+            // 所有車都快滿了，選剩餘最多的
+            : cars.filter(c => c !== currentCar).reduce((a, b) => (a.seats - a.members.length) >= (b.seats - b.members.length) ? a : b)
+          // 把親友從原車移走
+          currentCar.members = currentCar.members.filter(id => id !== matched.registration_id)
+          currentCar.leaders = (currentCar.leaders ?? []).filter(id => id !== matched.registration_id)
+          // 親友＋訪客一起進新車
+          targetCar.members.push(matched.registration_id)
+          targetCar.members.push(guest.registration_id)
+        }
         assigned.add(guest.registration_id)
       }
     }

@@ -21,8 +21,8 @@ const chNum = n => CHINESE_NUMS[n - 1] ?? String(n)
 const genId = () => `tmp-${Math.random().toString(36).slice(2)}`
 
 const DIRECTIONS = [
-  { key: 'down', label: '下山（回家）', emoji: '🚍' },
   { key: 'up',   label: '上山（回山）', emoji: '🚌' },
+  { key: 'down', label: '下山（回家）', emoji: '🚍' },
 ]
 const dirLabel = d => DIRECTIONS.find(x => x.key === d)?.label ?? d
 
@@ -335,7 +335,8 @@ export default function CarrangementDetailPage() {
 
   // ── 上下山兩份資料分開存 ──
   // direction: 目前正在編輯的方向（'up' / 'down'）
-  const [direction, setDirection] = useState('down')
+  // 一般流程：先排上山、再排下山（下山多半延用上山排法）
+  const [direction, setDirection] = useState('up')
 
   // 大車狀態：依方向各一份
   const [carsByDir, setCarsByDir]               = useState({ up: [], down: [] })
@@ -530,6 +531,55 @@ export default function CarrangementDetailPage() {
     if (largePeople.length === 0) { alert('此方向沒有搭精舍車的學員'); return }
     if (cars.length > 0 && !window.confirm(`自動排車會覆蓋目前「${dirLabel(direction)}」的排法，確定繼續？`)) return
     setCars(autoArrange(largePeople, Number(carCount), Number(seatsPerCar), relGroups))
+  }
+
+  // 把目前方向的排法（大車＋座位＋領隊＋法師）複製到另一個方向
+  // 規則：只保留「在另一個方向也搭精舍車（大車）」的人，其他人會自動被踢出大車
+  // 例如：上山搭精舍車、下山自己開車的學員，複製到下山時會被排除
+  function handleCopyToOtherDir() {
+    const otherDir = direction === 'up' ? 'down' : 'up'
+    const otherCarsExist = carsByDir[otherDir].length > 0
+    if (otherCarsExist && !window.confirm(`會覆蓋目前「${dirLabel(otherDir)}」的所有排車結果，確定繼續？`)) return
+
+    // 過濾每台車的成員：只保留另一方向也搭精舍車（isLargeCar）的人
+    let removedCount = 0
+    const copiedCars = carsByDir[direction].map(c => {
+      const keptMembers = c.members.filter(rid => {
+        const reg = regMap[rid]
+        if (!reg) return false
+        const keep = isLargeCar(reg, otherDir)
+        if (!keep) removedCount++
+        return keep
+      })
+      return {
+        tempId:   genId(),
+        car_name: c.car_name,
+        seats:    c.seats,
+        members:  keptMembers,
+        // 領隊只保留還在車上的人
+        leaders:  c.leaders.filter(lid => keptMembers.includes(lid)),
+        // 法師沒有報名資料，整批保留（可在另一方向 Tab 手動移除）
+        monks:    [...(c.monks ?? [])],
+        // access_token 不複製，留空，儲存後才產生新的
+      }
+    })
+
+    setCarsByDir(prev      => ({ ...prev, [otherDir]: copiedCars }))
+    setCarCountByDir(prev  => ({ ...prev, [otherDir]: carCountByDir[direction] }))
+    setSeatsPerCarByDir(prev => ({ ...prev, [otherDir]: seatsPerCarByDir[direction] }))
+    // orphan 與 guest small 依賴對應方向的 carpool 欄位，重新計算最準，不複製
+    setOrphanByDir(prev     => ({ ...prev, [otherDir]: {} }))
+    setGuestSmallByDir(prev => ({ ...prev, [otherDir]: {} }))
+
+    setDirection(otherDir)
+    const fromLabel = dirLabel(direction)
+    const toLabel   = dirLabel(otherDir)
+    setMsg(
+      removedCount > 0
+        ? `已從「${fromLabel}」複製到「${toLabel}」（自動排除 ${removedCount} 位另一方向不搭精舍車的人），記得按儲存`
+        : `已從「${fromLabel}」複製到「${toLabel}」，記得按儲存`
+    )
+    setTimeout(() => setMsg(''), 8000)
   }
 
   function movePerson(regId, target) {
@@ -823,12 +873,21 @@ export default function CarrangementDetailPage() {
               ✨ 自動排車
             </button>
             {cars.length > 0 && (
-              <button
-                onClick={() => { if (window.confirm(`確定清除「${dirLabel(direction)}」所有排車結果？`)) setCars([]) }}
-                className="px-3 py-2 text-sm border rounded-lg text-gray-500 hover:bg-gray-100 self-end"
-              >
-                清除
-              </button>
+              <>
+                <button
+                  onClick={handleCopyToOtherDir}
+                  className="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 self-end font-medium"
+                  title={`複製目前的排法到「${dirLabel(direction === 'up' ? 'down' : 'up')}」（會依報名資料自動篩選大車人員）`}
+                >
+                  📋 複製到{direction === 'up' ? '下山' : '上山'}
+                </button>
+                <button
+                  onClick={() => { if (window.confirm(`確定清除「${dirLabel(direction)}」所有排車結果？`)) setCars([]) }}
+                  className="px-3 py-2 text-sm border rounded-lg text-gray-500 hover:bg-gray-100 self-end"
+                >
+                  清除
+                </button>
+              </>
             )}
           </div>
 

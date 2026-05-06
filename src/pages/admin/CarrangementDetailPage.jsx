@@ -412,23 +412,31 @@ export default function CarrangementDetailPage() {
         setSeatsPerCar(mapped[0]?.seats ?? 20)
       }
 
-      // 小車：從已存的成員列表還原孤兒指派
+      // 小車：從已存的成員列表還原孤兒指派 & 訪客小車指派
       const smallSaved = savedCars.filter(c => c.car_type === 'small')
       if (smallSaved.length > 0) {
         const smallRegs = registrations.filter(r => isSmallCar(r.answers))
         const { matchedGroups: freshMatched } = computeSmallGroups(smallRegs)
-        const restored = {}
+        const restoredOrphans = {}
+        const restoredGuestSmall = {}
         for (const savedCar of smallSaved) {
           const groupKey = savedCar.note   // 司機的 registration_id
           const freshGroup = freshMatched.find(g => g.key === groupKey)
           const originalIds = new Set((freshGroup?.members ?? []).map(m => m.registration_id))
           for (const member of (savedCar.car_members ?? [])) {
             if (!originalIds.has(member.registration_id)) {
-              restored[member.registration_id] = groupKey
+              // 訪客（無 student_id）→ guestSmallOverrides；學員孤兒乘客 → orphanAssignments
+              const reg = registrations.find(r => r.registration_id === member.registration_id)
+              if (reg && !reg.student_id) {
+                restoredGuestSmall[member.registration_id] = groupKey
+              } else {
+                restoredOrphans[member.registration_id] = groupKey
+              }
             }
           }
         }
-        setOrphanAssignments(restored)
+        setOrphanAssignments(restoredOrphans)
+        setGuestSmallOverrides(restoredGuestSmall)
       }
     }
 
@@ -632,7 +640,7 @@ export default function CarrangementDetailPage() {
 
         {/* ── 大車排班 ── */}
         <section>
-          <h2 className="text-base font-bold text-gray-700 mb-4">🚌 大車排班</h2>
+          <h2 className="text-base font-bold text-gray-700 mb-4">🚌 大車排車</h2>
 
           {/* 設定列 */}
           <div className="flex items-end gap-3 mb-4 flex-wrap">

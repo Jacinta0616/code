@@ -715,14 +715,23 @@ export default function CarrangementDetailPage() {
                       onChange={e => updateCarName(ci, e.target.value)}
                       className="font-semibold text-sm bg-transparent border-b border-transparent hover:border-gray-300 focus:border-amber-400 focus:outline-none px-1 py-0.5 w-28"
                     />
-                    <span className="text-xs text-gray-400">{car.members.length} / {car.seats} 人</span>
+                    <span className="text-xs text-gray-500">
+                      座位數：<strong>{car.seats}</strong>
+                      <span className="mx-2 text-gray-300">|</span>
+                      已排入：<strong className={car.members.length > car.seats ? 'text-red-600' : ''}>{car.members.length}</strong>
+                    </span>
+                    {car.members.length > car.seats && (
+                      <span className="text-xs font-bold text-white bg-red-600 rounded-full px-2.5 py-0.5 animate-pulse">
+                        ⚠️ 超額 +{car.members.length - car.seats}
+                      </span>
+                    )}
+                    {car.members.length === car.seats && (
+                      <span className="text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5">已滿</span>
+                    )}
                     {car.leaders.length > 0 && (
                       <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
                         領隊：{car.leaders.map(lid => regMap[lid] ? getName(regMap[lid]) : '?').join('、')}
                       </span>
-                    )}
-                    {car.members.length >= car.seats && (
-                      <span className="text-xs text-red-500 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">已滿</span>
                     )}
                     <div className="ml-auto shrink-0">
                       {car.access_token ? (

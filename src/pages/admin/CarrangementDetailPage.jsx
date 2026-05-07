@@ -181,7 +181,9 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     }
   }
 
-  // 剩餘學員依班別＋組別分成小群，整群為單位排入（同班組儘量同車）
+  // 剩餘學員依班別＋組別分成小群，「大組優先 + 最大空位優先」分配
+  // 改變：不再先塞滿一台才換下一台，而是每個班組整組找剩餘空位最多的車塞入，
+  // 保留更多「整組同車」的機會，同時讓人數平均分散到所有車。
   const remaining = largePeople.filter(r => r.student_id && !assigned.has(r.registration_id))
   const groupMap = {}
   for (const r of remaining) {
@@ -190,18 +192,25 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     if (!groupMap[key]) groupMap[key] = { className: cls?.class_name ?? '', groupName: cls?.group_name ?? '', members: [] }
     groupMap[key].members.push(r.registration_id)
   }
+  // 大組優先（佔位較多的先處理，避免被小組搶走整車空間）；同大小再依班別字典序
   const sortedClassGroups = Object.values(groupMap).sort((a, b) => {
+    if (b.members.length !== a.members.length) return b.members.length - a.members.length
     if (a.className !== b.className) return a.className.localeCompare(b.className, 'zh-TW')
     return a.groupName.localeCompare(b.groupName, 'zh-TW')
   })
 
-  let ci = 0
-  outer: for (const group of sortedClassGroups) {
-    for (const rid of group.members) {
-      while (ci < carCount && cars[ci].members.length >= cars[ci].seats) ci++
-      if (ci >= carCount) break outer
-      cars[ci].members.push(rid)
-      assigned.add(rid)
+  for (const group of sortedClassGroups) {
+    let remainingTodo = [...group.members]
+    while (remainingTodo.length > 0) {
+      // 每次都找剩餘空位「最多」的車，整組塞下；單一車容不下時拆到下一台 max-avail 車
+      const target = cars.reduce((a, b) => avail(a) >= avail(b) ? a : b)
+      if (avail(target) <= 0) break  // 所有車都滿
+      const take = Math.min(remainingTodo.length, avail(target))
+      for (const rid of remainingTodo.slice(0, take)) {
+        target.members.push(rid)
+        assigned.add(rid)
+      }
+      remainingTodo = remainingTodo.slice(take)
     }
   }
 
@@ -983,6 +992,82 @@ export default function CarrangementDetailPage() {
             </div>
           )}
 
+          {/* 即時看板（含超額警示橫條） */}
+          {cars.length > 0 && (() => {
+            const overflows = cars.map((car, idx) => {
+              const total = car.members.length + (car.monks ?? []).length
+              return { idx, name: car.car_name, total, seats: car.seats, over: total - car.seats, tempId: car.tempId }
+            }).filter(x => x.over > 0)
+            return (
+              <div className="sticky top-0 z-20 -mx-4 px-4 py-2 mb-3 bg-white/95 backdrop-blur border-b border-gray-200 shadow-sm">
+                {/* 超額警示橫條 */}
+                {overflows.length > 0 && (
+                  <div className="mb-2 bg-red-100 border-2 border-red-500 rounded-lg px-3 py-2 text-sm flex items-center gap-2 animate-pulse">
+                    <span className="font-bold text-red-700 shrink-0">⚠️ 超額警示</span>
+                    <span className="text-red-700">
+                      {overflows.map((o, i) => (
+                        <span key={o.tempId}>
+                          {i > 0 && '、'}
+                          <button
+                            onClick={() => document.getElementById(`car-${o.tempId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                            className="underline hover:text-red-900 font-medium"
+                          >
+                            {o.name}（{o.total}/{o.seats}，+{o.over}）
+                          </button>
+                        </span>
+                      ))}
+                    </span>
+                  </div>
+                )}
+                {/* 即時看板 grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
+                  {cars.map((car) => {
+                    const monkCount  = (car.monks ?? []).length
+                    const totalInCar = car.members.length + monkCount
+                    const overflow   = totalInCar - car.seats
+                    const remaining  = car.seats - totalInCar
+                    const pct        = car.seats > 0 ? (totalInCar / car.seats) * 100 : 0
+                    return (
+                      <button
+                        key={car.tempId}
+                        onClick={() => document.getElementById(`car-${car.tempId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                        className={`text-left border rounded-lg p-2 text-xs hover:shadow transition-shadow ${
+                          overflow > 0
+                            ? 'bg-red-50 border-red-400'
+                            : remaining === 0
+                            ? 'bg-gray-100 border-gray-300'
+                            : 'bg-blue-50 border-blue-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between font-semibold">
+                          <span className="truncate text-gray-800">{car.car_name}</span>
+                          {overflow > 0 ? (
+                            <span className="text-red-600 font-bold whitespace-nowrap">+{overflow}</span>
+                          ) : remaining === 0 ? (
+                            <span className="text-gray-500 whitespace-nowrap">已滿</span>
+                          ) : (
+                            <span className="text-blue-700 whitespace-nowrap">剩 {remaining}</span>
+                          )}
+                        </div>
+                        <div className="text-gray-700 mt-0.5">
+                          <strong className={overflow > 0 ? 'text-red-600' : ''}>{totalInCar}</strong>
+                          <span className="text-gray-400">/{car.seats}</span>
+                          {monkCount > 0 && <span className="text-purple-600 ml-1">含法 {monkCount}</span>}
+                        </div>
+                        <div className="bg-white/80 rounded h-1.5 mt-1 overflow-hidden">
+                          <div
+                            className={`h-full transition-all ${overflow > 0 ? 'bg-red-500' : 'bg-blue-500'}`}
+                            style={{ width: `${Math.min(100, pct)}%` }}
+                          />
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+
           {/* 車輛卡片 */}
           {cars.length === 0 ? (
             <div className="text-sm text-gray-400 py-10 text-center border-2 border-dashed rounded-xl">
@@ -995,7 +1080,7 @@ export default function CarrangementDetailPage() {
                 const totalInCar  = car.members.length + monkCount
                 const overflow    = totalInCar - car.seats
                 return (
-                <div key={car.tempId} className="bg-white border rounded-xl shadow-sm overflow-hidden">
+                <div key={car.tempId} id={`car-${car.tempId}`} className="bg-white border rounded-xl shadow-sm overflow-hidden scroll-mt-4">
                   {/* 車次標題 */}
                   <div className="flex items-center gap-3 px-4 py-3 bg-amber-100 border-b-2 border-amber-300">
                     <input

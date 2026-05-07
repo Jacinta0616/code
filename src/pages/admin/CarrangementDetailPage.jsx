@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import AdminLayout from '../../components/AdminLayout'
+import SearchableSelect from '../../components/SearchableSelect'
 import {
   getAllEvents,
   getEventRegistrationsDetail,
@@ -1036,10 +1037,16 @@ export default function CarrangementDetailPage() {
           </div>
 
           {/* 提示 */}
-          <p className="text-xs text-gray-400 mb-3">
-            自動排車邏輯：「關係連結成員」「訪客＋親友（host 學員）」整組打包同車 → 以「班別」為單位整班同車（已有人在某車的班會跟過去）→ 整班裝不下時，從「最小組」整組搬出，搬出的組合再整批塞同一車；以此類推，最大化「同班同車、同組同車」。<br />
-            排好後可用每人右側的下拉選單手動調整車次，並勾選「領隊」標記當車領隊。
-          </p>
+          <div className="text-xs text-gray-500 mb-3 leading-relaxed space-y-1">
+            <p>
+              <span className="font-semibold text-gray-600">・自動排車邏輯：</span>
+              首先將具備關係連結的成員，以及訪客與其邀請學員視為整體進行同車分派。接著，系統以班級為單位進行作業，確保整班成員同車；若班級中已有成員預先配置於某車次，則該班其餘成員將自動歸併至該車。當車位不足以容納完整班級時，系統將自動篩選人數最少的小組，將其整組移撥至其他車次。
+            </p>
+            <p>
+              <span className="font-semibold text-gray-600">・手動微調：</span>
+              可透過每位成員右側的下拉選單手動調整車次，並依需求勾選「領隊」方框，完成當車負責人的標記與指派。
+            </p>
+          </div>
 
           {/* 需詢問訪客警示 */}
           {guestsNeedFollowup.length > 0 && (
@@ -1224,7 +1231,7 @@ export default function CarrangementDetailPage() {
                   {/* 法師指派（可選，不強制；一位法師同方向只能在一台車） */}
                   {allMonks.length > 0 && (
                     <div className="px-4 py-3 bg-purple-50 border-t border-purple-100">
-                      <div className="text-xs font-medium text-purple-600 mb-2">🏯 搭乘法師（可選，點別車會自動搬過來）</div>
+                      <div className="text-xs font-medium text-purple-600 mb-2">🏯 搭乘法師（可選）</div>
                       <div className="flex flex-wrap gap-2">
                         {allMonks.map(monk => {
                           const assignedCarIdx    = cars.findIndex(c => (c.monks ?? []).includes(monk.id))
@@ -1390,21 +1397,21 @@ export default function CarrangementDetailPage() {
             <span className="text-xs font-normal text-gray-400 ml-2">（上下山共用）</span>
           </h2>
           <div className="flex items-center gap-3 flex-wrap">
-            <select
+            <SearchableSelect
               value={smallCarLeaderRegId}
-              onChange={e => setSmallCarLeaderRegId(e.target.value)}
-              className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400 w-full max-w-xs"
-            >
-              <option value="">（未設定）</option>
-              {regs.filter(r => r.student_id).map(r => {
+              onChange={setSmallCarLeaderRegId}
+              className="w-full max-w-xs"
+              placeholder="（未設定）"
+              options={regs.filter(r => r.student_id).map(r => {
                 const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
-                return (
-                  <option key={r.registration_id} value={r.registration_id}>
-                    {getName(r)}{cls ? `　${cls}` : ''}
-                  </option>
-                )
+                return {
+                  value: r.registration_id,
+                  label: getName(r),
+                  sublabel: cls,
+                  searchText: `${getName(r)} ${cls} ${r.student_id ?? ''}`,
+                }
               })}
-            </select>
+            />
             {smallCarLeaderToken ? (
               <button
                 onClick={() => copyLink(smallCarLeaderToken, '小車領隊')}
@@ -1429,21 +1436,21 @@ export default function CarrangementDetailPage() {
             <span className="text-xs font-normal text-gray-400 ml-2">（上下山共用）</span>
           </h2>
           <div className="flex items-center gap-3 flex-wrap">
-            <select
+            <SearchableSelect
               value={headLeaderRegId}
-              onChange={e => setHeadLeaderRegId(e.target.value)}
-              className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 w-full max-w-xs"
-            >
-              <option value="">（未設定）</option>
-              {regs.filter(r => r.student_id).map(r => {
+              onChange={setHeadLeaderRegId}
+              className="w-full max-w-xs"
+              placeholder="（未設定）"
+              options={regs.filter(r => r.student_id).map(r => {
                 const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
-                return (
-                  <option key={r.registration_id} value={r.registration_id}>
-                    {getName(r)}{cls ? `　${cls}` : ''}
-                  </option>
-                )
+                return {
+                  value: r.registration_id,
+                  label: getName(r),
+                  sublabel: cls,
+                  searchText: `${getName(r)} ${cls} ${r.student_id ?? ''}`,
+                }
               })}
-            </select>
+            />
             {headLeaderToken ? (
               <button
                 onClick={() => copyLink(headLeaderToken, '總領隊')}

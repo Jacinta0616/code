@@ -25,6 +25,39 @@ const isGuest = (member) => !member?.registrations?.student_id
 
 const isCheckedIn = (member) => !!member?.registrations?.checked_in_at
 
+// 取得班級／組別清單（一個學員可能跨班）
+const getMemberClasses = (member) =>
+  member?.registrations?.students?.student_classes ?? []
+
+// 班組顯示字串：「初級日間 第一組／中級夜間 第三組」
+const formatMemberClasses = (member) => {
+  const classes = getMemberClasses(member)
+  if (classes.length === 0) return ''
+  return classes.map(c => c.class_name + (c.group_name ? ' ' + c.group_name : '')).join(' / ')
+}
+
+// 排序鍵：依第一筆班級+組別+姓名
+const memberSortKey = (member) => {
+  const classes = getMemberClasses(member)
+  const first = classes[0] || {}
+  return `${first.class_name ?? '￾'}|${first.group_name ?? '￾'}|${getMemberName(member)}`
+}
+
+// 報到頁排序：領隊 → 學員（依班+組+姓名），訪客最後
+function sortCheckinMembers(members, leaderRegIds) {
+  const leaderSet = new Set(leaderRegIds)
+  const isLeader  = m => leaderSet.has(m.registration_id)
+  const guestRank = m => isGuest(m) ? 1 : 0
+  const roleRank  = m => isLeader(m) ? 0 : 1
+  return [...members].sort((a, b) => {
+    const ga = guestRank(a), gb = guestRank(b)
+    if (ga !== gb) return ga - gb       // 訪客排最後
+    const ra = roleRank(a),  rb = roleRank(b)
+    if (ra !== rb) return ra - rb       // 領隊排前面
+    return memberSortKey(a).localeCompare(memberSortKey(b), 'zh-TW', { numeric: true })
+  })
+}
+
 const formatDate = (dateStr) => {
   if (!dateStr) return ''
   const d = new Date(dateStr)
@@ -340,12 +373,9 @@ export default function CarCheckinPage() {
     const eventDate     = formatDate(dateStart)
     const pct           = total > 0 ? Math.round((checkedIn / total) * 100) : 0
 
-    // 未報到在前、已報到在後
-    const sorted = [...members].sort((a, b) => {
-      const ai = isCheckedIn(a) ? 1 : 0
-      const bi = isCheckedIn(b) ? 1 : 0
-      return ai - bi
-    })
+    // 排序：領隊 → 學員 → 訪客（同段內依班級+組別+姓名）
+    const leaderRegIds = (car.car_leaders ?? []).map(l => l.registration_id)
+    const sorted = sortCheckinMembers(members, leaderRegIds)
 
     return (
       <div className="min-h-screen bg-amber-50 pb-24">
@@ -491,6 +521,11 @@ export default function CarCheckinPage() {
                       </span>
                     )}
                   </div>
+                  {formatMemberClasses(member) && (
+                    <div className="text-xs text-gray-500 mt-0.5 truncate">
+                      {formatMemberClasses(member)}
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
@@ -607,17 +642,23 @@ export default function CarCheckinPage() {
 
                 {/* 成員清單（常駐顯示，不需展開） */}
                 <div className="divide-y">
-                  {members.map(member => {
+                  {sortCheckinMembers(members, (c.car_leaders ?? []).map(l => l.registration_id)).map(member => {
                     const name   = getMemberName(member)
                     const guest  = isGuest(member)
                     const chk    = isCheckedIn(member)
                     const preArr = getPreArriveInfo(member.registrations?.answers, dateStart)
+                    const isLeader = (c.car_leaders ?? []).some(l => l.registration_id === member.registration_id)
+                    const cls    = formatMemberClasses(member)
                     return (
                       <div key={member.registration_id} className={`flex items-center gap-3 px-4 py-2.5 ${chk ? 'opacity-50' : ''}`}>
-                        <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
-                          <span className={`text-sm ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
-                          {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
-                          {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`text-sm ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
+                            {isLeader && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>}
+                            {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                            {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
+                          </div>
+                          {cls && <div className="text-[11px] text-gray-500 mt-0.5 truncate">{cls}</div>}
                         </div>
                         <button
                           onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
@@ -779,9 +820,8 @@ export default function CarCheckinPage() {
               return getMemberName(m)
             }).filter(Boolean)
 
-            const sorted = [...(c.car_members ?? [])].sort((a, b) =>
-              (isCheckedIn(a) ? 1 : 0) - (isCheckedIn(b) ? 1 : 0)
-            )
+            const leaderRegIds = (c.car_leaders ?? []).map(l => l.registration_id)
+            const sorted = sortCheckinMembers(c.car_members ?? [], leaderRegIds)
 
             return (
               <div key={c.car_id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -834,17 +874,21 @@ export default function CarCheckinPage() {
                       const guest    = isGuest(member)
                       const chk      = isCheckedIn(member)
                       const isLeader = (c.car_leaders ?? []).some(l => l.registration_id === member.registration_id)
+                      const cls      = formatMemberClasses(member)
                       return (
                         <div key={member.registration_id} className={`flex items-center gap-3 px-4 py-2.5 ${chk ? 'opacity-55' : ''}`}>
-                          <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
-                            <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
-                            {isLeader && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>}
-                            {guest    && <span className="text-xs bg-blue-100  text-blue-600  rounded-full px-1.5 shrink-0">訪客</span>}
-                            {getPreArriveInfo(member.registrations?.answers, dateStart) && (
-                              <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">
-                                {getPreArriveInfo(member.registrations?.answers, dateStart)}
-                              </span>
-                            )}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
+                              {isLeader && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>}
+                              {guest    && <span className="text-xs bg-blue-100  text-blue-600  rounded-full px-1.5 shrink-0">訪客</span>}
+                              {getPreArriveInfo(member.registrations?.answers, dateStart) && (
+                                <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">
+                                  {getPreArriveInfo(member.registrations?.answers, dateStart)}
+                                </span>
+                              )}
+                            </div>
+                            {cls && <div className="text-[11px] text-gray-500 mt-0.5 truncate">{cls}</div>}
                           </div>
                           <button
                             onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}
@@ -897,9 +941,8 @@ export default function CarCheckinPage() {
                     const done      = checked === total && total > 0
                     const innerExp  = expandedSmallCarId === c.car_id
 
-                    const sorted = [...(c.car_members ?? [])].sort((a, b) =>
-                      (isCheckedIn(a) ? 1 : 0) - (isCheckedIn(b) ? 1 : 0)
-                    )
+                    const innerLeaderRegIds = (c.car_leaders ?? []).map(l => l.registration_id)
+                    const sorted = sortCheckinMembers(c.car_members ?? [], innerLeaderRegIds)
 
                     return (
                       <div key={c.car_id} className="bg-gray-50">
@@ -927,12 +970,18 @@ export default function CarCheckinPage() {
                               const guest = isGuest(member)
                               const chk   = isCheckedIn(member)
                               const preArr = getPreArriveInfo(member.registrations?.answers, dateStart)
+                              const isLeader = innerLeaderRegIds.includes(member.registration_id)
+                              const cls   = formatMemberClasses(member)
                               return (
                                 <div key={member.registration_id} className={`flex items-center gap-3 px-5 py-2.5 ${chk ? 'opacity-55' : ''}`}>
-                                  <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
-                                    <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
-                                    {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
-                                    {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className={`text-sm truncate ${chk ? 'line-through text-gray-400' : 'text-gray-700 font-medium'}`}>{name}</span>
+                                      {isLeader && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-1.5 shrink-0">領隊</span>}
+                                      {guest  && <span className="text-xs bg-blue-100 text-blue-600 rounded-full px-1.5 shrink-0">訪客</span>}
+                                      {preArr && <span className="text-xs bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-1.5 shrink-0">{preArr}</span>}
+                                    </div>
+                                    {cls && <div className="text-[11px] text-gray-500 mt-0.5 truncate">{cls}</div>}
                                   </div>
                                   <button
                                     onClick={() => handleToggleCheckin(member.registration_id, member.registrations?.checked_in_at)}

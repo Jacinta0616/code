@@ -340,7 +340,7 @@ export async function getRegistrationsWithStudents(eventId) {
       registered_at,
       checked_in_at,
       terminal,
-      students ( name )
+      students ( name, student_classes ( class_name, group_name ) )
     `)
     .eq('event_id', eventId)
     .order('registered_at', { ascending: true })
@@ -985,7 +985,7 @@ export async function getCarByToken(token) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name )
+          students ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_leaders ( registration_id ),
@@ -1032,7 +1032,7 @@ export async function getLinkedCarsForLeader(eventId, leaderRegIds) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name )
+          students ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_leaders ( registration_id ),
@@ -1080,7 +1080,7 @@ export async function getAllCarsProgress(eventId) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name )
+          students ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_monks ( id, monk_id, checked_in_at, temple_monks ( name ) )
@@ -1106,7 +1106,7 @@ export async function getAllSmallCarsProgress(eventId) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name )
+          students ( name, student_classes ( class_name, group_name ) )
         )
       )
     `)
@@ -1140,7 +1140,7 @@ export async function findLeaderByStudentId(studentId) {
     .select(`
       registration_id,
       car_assignments (
-        car_name, access_token, car_type,
+        car_name, access_token, car_type, direction,
         events ( event_id, name, status )
       )
     `)
@@ -1166,6 +1166,7 @@ export async function findLeaderByStudentId(studentId) {
       eventId: car.events.event_id,
       eventName: car.events.name,
       carName: car.car_name,
+      direction: car.direction ?? 'down',
     })
   }
 

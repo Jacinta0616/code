@@ -200,6 +200,9 @@ export default function EventDetailPage() {
   const [sortKey, setSortKey] = useState('registered_at')
   const [sortDir, setSortDir] = useState('desc')
 
+  // 報名名單搜尋
+  const [listSearch, setListSearch] = useState('')
+
   // 欄位顯隱切換
   const [showCheckin, setShowCheckin] = useState(false)
   const [showRegTime, setShowRegTime] = useState(false)
@@ -350,8 +353,25 @@ export default function EventDetailPage() {
 
   useEffect(() => { load() }, [load])
 
+  // 搜尋過濾（依姓名／學員編號／班級／答案內容）
+  const searchedRegistrations = (() => {
+    const q = listSearch.trim().toLowerCase()
+    if (!q) return registrations
+    return registrations.filter(r => {
+      const name = getDisplayName(r)
+      const sid  = r.student_id ?? ''
+      const cls  = (r.students?.student_classes ?? [])
+        .map(c => `${c.class_name ?? ''}${c.group_name ?? ''}`).join(' ')
+      // 把 answers 內所有字串值串起來搜尋
+      const answers = r.answers ? Object.values(r.answers)
+        .map(v => Array.isArray(v) ? v.join(' ') : (typeof v === 'boolean' ? '' : String(v ?? '')))
+        .join(' ') : ''
+      return `${name} ${sid} ${cls} ${answers}`.toLowerCase().includes(q)
+    })
+  })()
+
   // 排序後的報名名單
-  const sortedRegistrations = [...registrations].sort((a, b) => {
+  const sortedRegistrations = [...searchedRegistrations].sort((a, b) => {
     let aVal = '', bVal = ''
     if (sortKey === 'student_id') {
       aVal = a.student_id ?? '\uFFFF'  // 訪客排最後
@@ -1329,10 +1349,37 @@ export default function EventDetailPage() {
             )
           })()}
 
+          {/* 搜尋列 */}
+          <div className="mb-3 flex items-center gap-2">
+            <div className="relative flex-1 max-w-md">
+              <input
+                value={listSearch}
+                onChange={e => setListSearch(e.target.value)}
+                placeholder="🔍 搜尋姓名、學員編號、班級或答案…"
+                className="w-full pl-3 pr-9 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
+              />
+              {listSearch && (
+                <button
+                  onClick={() => setListSearch('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500 text-base leading-none w-5 h-5 flex items-center justify-center"
+                  title="清除"
+                >×</button>
+              )}
+            </div>
+            {listSearch && (
+              <span className="text-xs text-gray-500">
+                找到 {searchedRegistrations.length} 筆
+              </span>
+            )}
+          </div>
+
           {/* 工具列 */}
           <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
             <div className="flex items-center gap-3 flex-wrap">
-              <p className="text-sm text-gray-500">共 {registrations.length} 筆報名</p>
+              <p className="text-sm text-gray-500">
+                共 {registrations.length} 筆報名
+                {listSearch && <span className="text-amber-700">（搜尋中：{searchedRegistrations.length}）</span>}
+              </p>
               {hasGuests && selectedGuestIds.size > 0 && (
                 <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
                   已選 {selectedGuestIds.size} 位訪客

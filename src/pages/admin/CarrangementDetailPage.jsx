@@ -181,37 +181,109 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     }
   }
 
-  // 剩餘學員依班別＋組別分成小群，「大組優先 + 最大空位優先」分配
-  // 改變：不再先塞滿一台才換下一台，而是每個班組整組找剩餘空位最多的車塞入，
-  // 保留更多「整組同車」的機會，同時讓人數平均分散到所有車。
+  // 剩餘學員以「班別」為主要分群單位，「整班同車」優先；裝不下時從最小組整組往外搬
+  // 邏輯：
+  //  (1) 找該班的「主車」：優先 existingCar（親友群預放的）→ 退而求其次 max-avail 車
+  //  (2) 整班可塞入主車 → 全部塞入
+  //  (3) 整班塞不下主車 → 從「最小組」開始整組搬出，直到剩下能塞入主車；
+  //                       搬出的每一組各自找 max-avail 車整組塞入
   const remaining = largePeople.filter(r => r.student_id && !assigned.has(r.registration_id))
-  const groupMap = {}
+  const regLookup = Object.fromEntries(largePeople.map(r => [r.registration_id, r]))
+
+  const classMap = {}
   for (const r of remaining) {
     const cls = getClasses(r)[0]
-    const key = `${cls?.class_name ?? ''}|||${cls?.group_name ?? ''}`
-    if (!groupMap[key]) groupMap[key] = { className: cls?.class_name ?? '', groupName: cls?.group_name ?? '', members: [] }
-    groupMap[key].members.push(r.registration_id)
+    const className = cls?.class_name ?? ''
+    if (!classMap[className]) classMap[className] = { className, groups: {} }
+    const groupName = cls?.group_name ?? ''
+    if (!classMap[className].groups[groupName]) classMap[className].groups[groupName] = []
+    classMap[className].groups[groupName].push(r.registration_id)
   }
-  // 大組優先（佔位較多的先處理，避免被小組搶走整車空間）；同大小再依班別字典序
-  const sortedClassGroups = Object.values(groupMap).sort((a, b) => {
-    if (b.members.length !== a.members.length) return b.members.length - a.members.length
-    if (a.className !== b.className) return a.className.localeCompare(b.className, 'zh-TW')
-    return a.groupName.localeCompare(b.groupName, 'zh-TW')
-  })
+  // 大班優先（佔位多的先處理，搶 max-avail 車）；同大小依班別字典序
+  const sortedClasses = Object.values(classMap)
+    .map(c => {
+      const groupList = Object.entries(c.groups).map(([name, ids]) => ({ name, ids }))
+      const total = groupList.reduce((s, g) => s + g.ids.length, 0)
+      return { className: c.className, groupList, total }
+    })
+    .sort((a, b) => {
+      if (b.total !== a.total) return b.total - a.total
+      return a.className.localeCompare(b.className, 'zh-TW')
+    })
 
-  for (const group of sortedClassGroups) {
-    let remainingTodo = [...group.members]
-    while (remainingTodo.length > 0) {
-      // 每次都找剩餘空位「最多」的車，整組塞下；單一車容不下時拆到下一台 max-avail 車
-      const target = cars.reduce((a, b) => avail(a) >= avail(b) ? a : b)
-      if (avail(target) <= 0) break  // 所有車都滿
-      const take = Math.min(remainingTodo.length, avail(target))
-      for (const rid of remainingTodo.slice(0, take)) {
-        target.members.push(rid)
-        assigned.add(rid)
-      }
-      remainingTodo = remainingTodo.slice(take)
+  // 找該班已有成員在哪台車（親友群階段預放的）
+  const findExistingCar = (className) => cars.find(c => c.members.some(rid => {
+    const r = regLookup[rid]
+    if (!r?.student_id) return false
+    return getClasses(r)[0]?.class_name === className
+  }))
+
+  // 把人塞入指定車，回傳「沒塞進去的剩餘 ids」
+  const placeIntoCar = (car, ids) => {
+    const take = Math.min(ids.length, avail(car))
+    for (const rid of ids.slice(0, take)) {
+      car.members.push(rid)
+      assigned.add(rid)
     }
+    return ids.slice(take)
+  }
+  const maxAvailCar = () => cars.reduce((a, b) => avail(a) >= avail(b) ? a : b)
+
+  // 把一個 groupList（整批）塞入 mainCar 為起點的車隊：
+  //  - 整批能塞 → 全進主車
+  //  - 塞不下 → 從最小組整組搬出，剩下塞主車；搬出的組合「整批」再找新主車遞迴
+  //  - 邊界：只剩一組且大於 mainCar 空位 → 切該組（剩餘部分形成新群再遞迴）
+  function distributeGroupList(groupList, mainCar) {
+    if (groupList.length === 0) return
+    if (avail(mainCar) <= 0) {
+      const next = maxAvailCar()
+      if (avail(next) <= 0) return
+      distributeGroupList(groupList, next)
+      return
+    }
+
+    const total = groupList.reduce((s, g) => s + g.ids.length, 0)
+
+    // 整批能塞入主車 → 全部塞入
+    if (total <= avail(mainCar)) {
+      placeIntoCar(mainCar, groupList.flatMap(g => g.ids))
+      return
+    }
+
+    // 整批塞不下 → 從最小組整組搬出，直到剩下的能塞入主車
+    const groupsAsc = [...groupList].sort((a, b) => a.ids.length - b.ids.length)
+    const movedOut = []
+    let stayCount = total
+    while (stayCount > avail(mainCar) && groupsAsc.length > 1) {
+      const smallest = groupsAsc.shift()
+      movedOut.push(smallest)
+      stayCount -= smallest.ids.length
+    }
+
+    if (groupsAsc.length === 1 && stayCount > avail(mainCar)) {
+      // 邊界：只剩一組且仍大於主車空位 → 切該組（避免無限遞迴）
+      const onlyGroup = groupsAsc[0]
+      const remaining = placeIntoCar(mainCar, onlyGroup.ids)
+      if (remaining.length > 0) movedOut.push({ name: onlyGroup.name, ids: remaining })
+    } else {
+      // 留在主車的組：依組別字典序排，整批塞入主車
+      const stayGroups = groupsAsc.sort((a, b) => a.name.localeCompare(b.name, 'zh-TW'))
+      placeIntoCar(mainCar, stayGroups.flatMap(g => g.ids))
+    }
+
+    // 搬出的組合 → 整批找新主車（max-avail）遞迴處理，儘量同車
+    if (movedOut.length > 0) {
+      const nextMain = maxAvailCar()
+      if (avail(nextMain) > 0) distributeGroupList(movedOut, nextMain)
+    }
+  }
+
+  for (const cls of sortedClasses) {
+    // 主車：優先 existingCar（同班預放）→ 退而求其次 max-avail
+    let mainCar = findExistingCar(cls.className)
+    if (!mainCar || avail(mainCar) <= 0) mainCar = maxAvailCar()
+    if (avail(mainCar) <= 0) break  // 所有車都滿
+    distributeGroupList(cls.groupList, mainCar)
   }
 
   // 剩餘訪客（沒填備註找不到 host，或先前 host 群組塞滿後溢出）：放任一還有空位的車
@@ -965,7 +1037,7 @@ export default function CarrangementDetailPage() {
 
           {/* 提示 */}
           <p className="text-xs text-gray-400 mb-3">
-            自動排車邏輯：先把「關係連結成員」與「訪客＋親友（host 學員）」整組打包同車 → 再依班級組別分配剩餘座位。<br />
+            自動排車邏輯：「關係連結成員」「訪客＋親友（host 學員）」整組打包同車 → 以「班別」為單位整班同車（已有人在某車的班會跟過去）→ 整班裝不下時，從「最小組」整組搬出，搬出的組合再整批塞同一車；以此類推，最大化「同班同車、同組同車」。<br />
             排好後可用每人右側的下拉選單手動調整車次，並勾選「領隊」標記當車領隊。
           </p>
 

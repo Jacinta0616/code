@@ -34,13 +34,18 @@ CREATE TABLE IF NOT EXISTS events (
   date_start  DATE,
   date_end    DATE,
   location    TEXT,
+  event_type  TEXT NOT NULL DEFAULT 'mountain'
+                CHECK (event_type IN ('temple', 'mountain')),
+  is_dharma   BOOLEAN NOT NULL DEFAULT false,
   status      TEXT NOT NULL DEFAULT 'draft'
                 CHECK (status IN ('draft', 'active', 'closed')),
   locked      BOOLEAN NOT NULL DEFAULT false,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON COLUMN events.locked IS '是否鎖定報名（true = 前台只能查看，不能新增/修改/取消）';
+COMMENT ON COLUMN events.locked     IS '是否鎖定報名（true = 前台只能查看，不能新增/修改/取消）';
+COMMENT ON COLUMN events.event_type IS '活動類型：temple=精舍活動、mountain=回山活動';
+COMMENT ON COLUMN events.is_dharma  IS '是否為法會（控制功德主管理顯示）';
 
 -- 活動動態欄位表
 CREATE TABLE IF NOT EXISTS event_fields (

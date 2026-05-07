@@ -17,7 +17,7 @@ export default function EventsPage() {
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ name: '', date_start: '', date_end: '', location: '', status: 'draft' })
+  const [form, setForm] = useState({ name: '', date_start: '', date_end: '', location: '', status: 'draft', event_type: 'mountain', is_dharma: false })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
 
@@ -47,6 +47,8 @@ export default function EventsPage() {
       date_end: form.date_end || null,
       location: form.location,
       status: form.status,
+      event_type: form.event_type,
+      is_dharma: form.is_dharma,
     })
 
     setSaving(false)
@@ -57,7 +59,7 @@ export default function EventsPage() {
     }
 
     setShowForm(false)
-    setForm({ name: '', date_start: '', date_end: '', location: '', status: 'draft' })
+    setForm({ name: '', date_start: '', date_end: '', location: '', status: 'draft', event_type: 'mountain', is_dharma: false })
     navigate(`/admin/events/${event.event_id}`)
   }
 
@@ -118,6 +120,17 @@ export default function EventsPage() {
               />
             </div>
             <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">活動類型 *</label>
+              <select
+                value={form.event_type}
+                onChange={e => setForm(f => ({ ...f, event_type: e.target.value }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              >
+                <option value="mountain">回山活動（看板顯示排車資訊）</option>
+                <option value="temple">精舍活動（看板顯示午齋／停車）</option>
+              </select>
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">狀態</label>
               <select
                 value={form.status}
@@ -128,6 +141,17 @@ export default function EventsPage() {
                 <option value="active">進行中</option>
                 <option value="closed">已關閉</option>
               </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={form.is_dharma}
+                  onChange={e => setForm(f => ({ ...f, is_dharma: e.target.checked }))}
+                  className="w-4 h-4 accent-amber-600"
+                />
+                此為法會活動（之後會出現「功德主管理」）
+              </label>
             </div>
 
             {formError && (

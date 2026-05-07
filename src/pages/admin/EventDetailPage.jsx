@@ -169,6 +169,39 @@ function computeDashboardStats(regs, fields) {
   }
 }
 
+// 精舍活動：午齋 / 停車（機車、轎車）統計
+function computeTempleStats(regs, fields) {
+  const identityField = fields.find(f => f.field_key === 'identity')
+  const lunchField    = fields.find(f => f.field_key === 'need_lunch')
+  const parkingField  = fields.find(f => f.field_key === 'parking_type')
+
+  const identityCounts = {}
+  if (identityField) {
+    for (const r of regs) {
+      const val = r.answers?.[identityField.field_key]
+      if (val) identityCounts[val] = (identityCounts[val] || 0) + 1
+    }
+  }
+
+  let lunchCount = 0
+  let motorcycle = 0
+  let car = 0
+  for (const r of regs) {
+    if (lunchField && r.answers?.[lunchField.field_key] === true) lunchCount++
+    if (parkingField) {
+      const val = r.answers?.[parkingField.field_key]
+      if (val === '機車') motorcycle++
+      else if (val === '轎車') car++
+    }
+  }
+
+  return {
+    identityField, identityCounts,
+    hasLunch: !!lunchField, lunchCount,
+    hasParking: !!parkingField, motorcycle, car,
+  }
+}
+
 // ── 主頁面 ─────────────────────────────────────────────────
 export default function EventDetailPage() {
   const { id } = useParams()
@@ -342,6 +375,8 @@ export default function EventDetailPage() {
       date_end: ev.date_end ?? '',
       location: ev.location ?? '',
       status: ev.status,
+      event_type: ev.event_type ?? 'mountain',
+      is_dharma: !!ev.is_dharma,
     })
     setFields(f)
     setRegistrations(r)
@@ -432,6 +467,8 @@ export default function EventDetailPage() {
       date_end: form.date_end || null,
       location: form.location,
       status: form.status,
+      event_type: form.event_type,
+      is_dharma: form.is_dharma,
     })
     setSaving(false)
     setSaveMsg(success ? '✅ 已儲存' : `❌ ${error}`)
@@ -1069,6 +1106,16 @@ export default function EventDetailPage() {
               />
             </div>
             <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">活動類型 *</label>
+              <select value={form.event_type ?? 'mountain'}
+                onChange={e => setForm(f => ({ ...f, event_type: e.target.value }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              >
+                <option value="mountain">回山活動（看板顯示排車資訊）</option>
+                <option value="temple">精舍活動（看板顯示午齋／停車）</option>
+              </select>
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">狀態</label>
               <select value={form.status}
                 onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
@@ -1078,6 +1125,17 @@ export default function EventDetailPage() {
                 <option value="active">進行中</option>
                 <option value="closed">已關閉</option>
               </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!form.is_dharma}
+                  onChange={e => setForm(f => ({ ...f, is_dharma: e.target.checked }))}
+                  className="w-4 h-4 accent-amber-600"
+                />
+                此為法會活動（之後會出現「功德主管理」）
+              </label>
             </div>
           </div>
           <div className="flex justify-end">
@@ -1270,8 +1328,75 @@ export default function EventDetailPage() {
             </div>
           )}
 
-          {/* 即時看板 */}
-          {registrations.length > 0 && (() => {
+          {/* 即時看板（精舍版） */}
+          {registrations.length > 0 && event?.event_type === 'temple' && (() => {
+            const { identityField, identityCounts, hasLunch, lunchCount, hasParking, motorcycle, car } =
+              computeTempleStats(registrations, fields)
+            const hasIdentity = !!identityField && Object.keys(identityCounts).length > 0
+            if (!hasIdentity && !hasLunch && !hasParking) return null
+
+            const identityOptions = identityField?.options ?? []
+            const sortedIdentities = [
+              ...identityOptions.filter(o => identityCounts[o] !== undefined),
+              ...Object.keys(identityCounts).filter(k => !identityOptions.includes(k)),
+            ]
+
+            return (
+              <div className="mb-4 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 space-y-2.5">
+                <p className="text-[11px] font-semibold text-emerald-500 uppercase tracking-widest">即時看板（精舍）</p>
+
+                {/* 身份別人數 */}
+                {hasIdentity && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500 shrink-0 w-14">身份</span>
+                    <div className="flex flex-wrap gap-2">
+                      {sortedIdentities.map(val => (
+                        <span key={val} className="inline-flex items-center gap-1 bg-white border border-emerald-200 rounded-lg px-2.5 py-1 shadow-sm">
+                          <span className="text-xs text-gray-600">{val}</span>
+                          <span className="text-sm font-bold text-emerald-700 leading-none">{identityCounts[val]}</span>
+                          <span className="text-xs text-gray-400">人</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 午齋 */}
+                {hasLunch && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500 shrink-0 w-14">午齋</span>
+                    <span className="inline-flex items-center gap-1 bg-white border border-emerald-200 rounded-lg px-2.5 py-1 shadow-sm">
+                      <span className="text-xs text-gray-500">需要</span>
+                      <span className="text-sm font-bold text-amber-600 leading-none">{lunchCount}</span>
+                      <span className="text-xs text-gray-400">份</span>
+                    </span>
+                  </div>
+                )}
+
+                {/* 停車（機車、轎車） */}
+                {hasParking && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500 shrink-0 w-14">停車</span>
+                    <div className="flex flex-wrap gap-2">
+                      <span className="inline-flex items-center gap-1 bg-white border border-emerald-200 rounded-lg px-2.5 py-1 shadow-sm">
+                        <span className="text-xs text-gray-500">機車</span>
+                        <span className="text-sm font-bold text-blue-700 leading-none">{motorcycle}</span>
+                        <span className="text-xs text-gray-400">輛</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 bg-white border border-emerald-200 rounded-lg px-2.5 py-1 shadow-sm">
+                        <span className="text-xs text-gray-500">轎車</span>
+                        <span className="text-sm font-bold text-indigo-700 leading-none">{car}</span>
+                        <span className="text-xs text-gray-400">輛</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* 即時看板（回山版） */}
+          {registrations.length > 0 && event?.event_type !== 'temple' && (() => {
             const { identityField, identityCounts, upStats, downStats, hasUp, hasDown } =
               computeDashboardStats(registrations, fields)
             const hasIdentity = !!identityField && Object.keys(identityCounts).length > 0

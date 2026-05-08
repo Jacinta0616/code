@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS registrations (
   registration_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id        UUID NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
   student_id      TEXT REFERENCES students(student_id) ON DELETE SET NULL,  -- NULL = 訪客
-  host_student_id TEXT REFERENCES students(student_id) ON DELETE SET NULL,  -- 訪客被誰代報（用於排車）
+  host_student_id TEXT,                                                     -- 訪客被誰代報（不加 FK 避免 PostgREST 歧義）
   answers         JSONB NOT NULL DEFAULT '{}',
   registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   checked_in_at   TIMESTAMPTZ,

@@ -340,7 +340,7 @@ export async function getRegistrationsWithStudents(eventId) {
       registered_at,
       checked_in_at,
       terminal,
-      students ( name, student_classes ( class_name, group_name ) )
+      students!student_id ( name, student_classes ( class_name, group_name ) )
     `)
     .eq('event_id', eventId)
     .order('registered_at', { ascending: true })
@@ -357,7 +357,7 @@ export async function getRegistrationsWithStudents(eventId) {
 export async function getRegistrationForCheckin(eventId, studentId) {
   const { data, error } = await supabase
     .from('registrations')
-    .select('registration_id, answers, checked_in_at, students(name)')
+    .select('registration_id, answers, checked_in_at, students!student_id(name)')
     .eq('event_id', eventId)
     .eq('student_id', studentId)
     .single()
@@ -722,7 +722,7 @@ export async function getEventRegistrationsDetail(eventId) {
       host_student_id,
       answers,
       registered_at,
-      students ( name, student_classes(class_name, group_name) )
+      students!student_id ( name, student_classes(class_name, group_name) )
     `)
     .eq('event_id', eventId)
     .order('registered_at', { ascending: true })
@@ -1016,7 +1016,7 @@ export async function getCarByToken(token) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name, student_classes ( class_name, group_name ) )
+          students!student_id ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_leaders ( registration_id ),
@@ -1063,7 +1063,7 @@ export async function getLinkedCarsForLeader(eventId, leaderRegIds) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name, student_classes ( class_name, group_name ) )
+          students!student_id ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_leaders ( registration_id ),
@@ -1086,7 +1086,7 @@ export async function getHeadLeaderByToken(token) {
     .select(`
       id, registration_id, event_id, type,
       events ( event_id, name, date_start ),
-      registrations ( answers, student_id, students ( name ) )
+      registrations ( answers, student_id, students!student_id ( name ) )
     `)
     .eq('access_token', token)
     .single()
@@ -1111,7 +1111,7 @@ export async function getAllCarsProgress(eventId) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name, student_classes ( class_name, group_name ) )
+          students!student_id ( name, student_classes ( class_name, group_name ) )
         )
       ),
       car_monks ( id, monk_id, checked_in_at, temple_monks ( name ) )
@@ -1137,7 +1137,7 @@ export async function getAllSmallCarsProgress(eventId) {
         registration_id,
         registrations (
           registration_id, answers, checked_in_at, student_id,
-          students ( name, student_classes ( class_name, group_name ) )
+          students!student_id ( name, student_classes ( class_name, group_name ) )
         )
       )
     `)

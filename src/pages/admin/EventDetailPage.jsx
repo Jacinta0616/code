@@ -79,11 +79,13 @@ function SortTh({ label, colKey, current, dir, onSort, className = '' }) {
 // ── CSV 匯出 ───────────────────────────────────────────────
 function exportCSV(registrations, fields, event) {
   const answerHeaders = fields.map(f => f.field_label)
-  const header = ['學員編號', '姓名', '報名時間', '報到時間', ...answerHeaders]
+  const header = ['學員編號', '姓名', '更新時間', '報到時間', ...answerHeaders]
 
   const rows = registrations.map(r => {
     const name = getDisplayName(r)
-    const regAt = r.registered_at ? new Date(r.registered_at).toLocaleString('zh-TW') : ''
+    // 名單時間以最後更新為準（INSERT 與後續編輯都會推進 updated_at）
+    const stamp = r.updated_at ?? r.registered_at
+    const regAt = stamp ? new Date(stamp).toLocaleString('zh-TW') : ''
     const checkinAt = r.checked_in_at ? new Date(r.checked_in_at).toLocaleString('zh-TW') : ''
     const answerCols = fields.map(f => {
       const val = r.answers?.[f.field_key]
@@ -170,6 +172,11 @@ function computeDashboardStats(regs, fields) {
 }
 
 // 精舍活動：午齋 / 停車（機車、轎車）統計
+//
+// 停車輛數的計算方式：
+// - 若名單中有任何報名標記 is_driver=true（場景：有「車號」plate 欄位的活動），
+//   進入「司機模式」— 只計司機本人，避免共乘者重複佔位（同台車多人都選「轎車」會被算成多輛）。
+// - 若名單完全沒有 is_driver=true（舊活動 / 未啟用車號欄位），維持舊行為計人頭。
 function computeTempleStats(regs, fields) {
   const identityField = fields.find(f => f.field_key === 'identity')
   const lunchField    = fields.find(f => f.field_key === 'need_lunch')
@@ -183,6 +190,8 @@ function computeTempleStats(regs, fields) {
     }
   }
 
+  const driverAware = regs.some(r => r.is_driver === true)
+
   let lunchCount = 0
   let motorcycle = 0
   let car = 0
@@ -190,6 +199,8 @@ function computeTempleStats(regs, fields) {
     if (lunchField && r.answers?.[lunchField.field_key] === true) lunchCount++
     if (parkingField) {
       const val = r.answers?.[parkingField.field_key]
+      if (!val) continue
+      if (driverAware && !r.is_driver) continue   // 司機模式：非司機跳過
       if (val === '機車') motorcycle++
       else if (val === '轎車') car++
     }
@@ -199,6 +210,7 @@ function computeTempleStats(regs, fields) {
     identityField, identityCounts,
     hasLunch: !!lunchField, lunchCount,
     hasParking: !!parkingField, motorcycle, car,
+    driverAware,
   }
 }
 
@@ -229,8 +241,8 @@ export default function EventDetailPage() {
   const [changes, setChanges] = useState([])
   const [showCancelled, setShowCancelled] = useState(false)
 
-  // 報名名單排序
-  const [sortKey, setSortKey] = useState('registered_at')
+  // 報名名單排序（時間欄改用 updated_at；最後異動排序最有用）
+  const [sortKey, setSortKey] = useState('updated_at')
   const [sortDir, setSortDir] = useState('desc')
 
   // 報名名單搜尋
@@ -417,9 +429,10 @@ export default function EventDetailPage() {
     } else if (sortKey === 'checked_in_at') {
       aVal = a.checked_in_at ?? ''
       bVal = b.checked_in_at ?? ''
-    } else if (sortKey === 'registered_at') {
-      aVal = a.registered_at ?? ''
-      bVal = b.registered_at ?? ''
+    } else if (sortKey === 'updated_at' || sortKey === 'registered_at') {
+      // 統一用 updated_at（registered_at 為舊鍵向後相容）
+      aVal = a.updated_at ?? a.registered_at ?? ''
+      bVal = b.updated_at ?? b.registered_at ?? ''
     } else if (sortKey.startsWith('field:')) {
       const fKey = sortKey.slice(6)
       let av = a.answers?.[fKey] ?? ''
@@ -1073,7 +1086,23 @@ export default function EventDetailPage() {
       {/* ── Tab: 活動設定 ── */}
       {tab === 'info' && (
         <>
-        <form onSubmit={handleSaveInfo} className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+        {/* 頂部儲存列（藍色主按鈕，提升優先級） */}
+        <div className="sticky top-0 z-10 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3 shadow-sm">
+          <div className="text-sm text-blue-800 min-w-0">
+            <p className="font-semibold">活動設定</p>
+            <p className="text-xs text-blue-600/80 truncate">修改任一欄位後請按右側按鈕儲存</p>
+          </div>
+          <button
+            type="submit"
+            form="event-info-form"
+            disabled={saving}
+            className="shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg transition-colors disabled:opacity-50 shadow"
+          >
+            {saving ? '儲存中…' : '💾 儲存設定'}
+          </button>
+        </div>
+
+        <form id="event-info-form" onSubmit={handleSaveInfo} className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
           <div className="grid sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-gray-600 mb-1">活動名稱 *</label>
@@ -1138,34 +1167,8 @@ export default function EventDetailPage() {
               </label>
             </div>
           </div>
-          <div className="flex justify-end">
-            <button type="submit" disabled={saving}
-              className="bg-amber-700 hover:bg-amber-800 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors disabled:opacity-50"
-            >
-              {saving ? '儲存中…' : '儲存設定'}
-            </button>
-          </div>
+          {/* （原本底部的儲存按鈕已移至頁面頂部 sticky bar） */}
         </form>
-
-        {/* 刪除活動區塊 */}
-        <div className="mt-4 rounded-xl border-2 border-red-200 bg-red-50 p-5 flex items-start gap-4">
-          <div className="flex-1">
-            <p className="text-sm font-semibold text-red-700">🗑️ 刪除此活動</p>
-            <p className="text-xs text-gray-500 mt-1">
-              刪除後，活動設定、動態欄位與所有報名紀錄將永久移除，無法復原。
-              {registrations.length > 0 && (
-                <span className="text-red-600 font-medium"> 目前有 {registrations.length} 筆報名紀錄。</span>
-              )}
-            </p>
-          </div>
-          <button
-            disabled={deleting}
-            onClick={handleDeleteEvent}
-            className="shrink-0 text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 bg-white border-2 border-red-400 text-red-700 hover:bg-red-100"
-          >
-            {deleting ? '刪除中…' : '刪除活動'}
-          </button>
-        </div>
 
         {/* 停止異動區塊 */}
         <div className={`mt-4 rounded-xl border-2 p-5 flex items-start gap-4 ${
@@ -1252,6 +1255,26 @@ export default function EventDetailPage() {
               </div>
             </>
           )}
+        </div>
+
+        {/* 刪除活動（移至最下方，降權為灰色） */}
+        <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50 p-4 flex items-start gap-3">
+          <div className="flex-1 text-xs text-gray-500">
+            <p className="font-medium text-gray-600">⚠️ 危險區域</p>
+            <p className="mt-0.5">
+              刪除後，活動設定、動態欄位與所有報名紀錄將永久移除，無法復原。
+              {registrations.length > 0 && (
+                <span className="text-red-500"> 目前有 {registrations.length} 筆報名紀錄。</span>
+              )}
+            </p>
+          </div>
+          <button
+            disabled={deleting}
+            onClick={handleDeleteEvent}
+            className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 hover:text-red-600 hover:border-red-300 transition-colors disabled:opacity-50"
+          >
+            {deleting ? '刪除中…' : '🗑 刪除活動'}
+          </button>
         </div>
         </>
       )}
@@ -1515,7 +1538,7 @@ export default function EventDetailPage() {
                 <span className="text-xs text-gray-400">顯示欄位：</span>
                 {[
                   { key: 'checkin', label: '報到', val: showCheckin, set: setShowCheckin },
-                  { key: 'regtime', label: '報名時間', val: showRegTime, set: setShowRegTime },
+                  { key: 'regtime', label: '更新時間', val: showRegTime, set: setShowRegTime },
                 ].map(col => (
                   <button
                     key={col.key}
@@ -1623,7 +1646,7 @@ export default function EventDetailPage() {
                       />
                     ))}
                     {showCheckin && <SortTh label="報到" colKey="checked_in_at" current={sortKey} dir={sortDir} onSort={handleSort} />}
-                    {showRegTime && <SortTh label="報名時間" colKey="registered_at" current={sortKey} dir={sortDir} onSort={handleSort} />}
+                    {showRegTime && <SortTh label="更新時間" colKey="updated_at" current={sortKey} dir={sortDir} onSort={handleSort} />}
                     <th className="sticky right-0 z-20 bg-gray-50 px-3 py-2 shadow-[-2px_0_4px_-1px_rgba(0,0,0,0.08)]" />
                   </tr>
                 </thead>
@@ -1699,8 +1722,8 @@ export default function EventDetailPage() {
                         )}
                         {showRegTime && (
                           <td className="px-3 py-1.5 text-xs text-gray-400 whitespace-nowrap">
-                            {r.registered_at
-                              ? new Date(r.registered_at).toLocaleString('zh-TW', { hour12: false })
+                            {(r.updated_at ?? r.registered_at)
+                              ? new Date(r.updated_at ?? r.registered_at).toLocaleString('zh-TW', { hour12: false })
                               : '-'}
                           </td>
                         )}

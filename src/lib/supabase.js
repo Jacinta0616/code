@@ -131,14 +131,15 @@ export async function checkDuplicate(eventId, studentId) {
   return data && data.length > 0
 }
 
-export async function submitRegistration(eventId, studentId, answers, terminal = 'tablet-01') {
+export async function submitRegistration(eventId, studentId, answers, terminal = 'tablet-01', isDriver = false) {
   const { error } = await supabase
     .from('registrations')
     .upsert({
       event_id: eventId,
       student_id: studentId,
       answers,
-      terminal
+      terminal,
+      is_driver: !!isDriver,
     }, { onConflict: 'event_id,student_id' })
 
   if (error) return { success: false, error: error.message }
@@ -156,10 +157,12 @@ export async function getRegistration(eventId, studentId) {
   return data
 }
 
-export async function updateRegistration(registrationId, answers) {
+export async function updateRegistration(registrationId, answers, isDriver = undefined) {
+  const payload = { answers }
+  if (typeof isDriver === 'boolean') payload.is_driver = isDriver
   const { error } = await supabase
     .from('registrations')
-    .update({ answers })
+    .update(payload)
     .eq('registration_id', registrationId)
   if (error) return { success: false, error: error.message }
   return { success: true, error: null }
@@ -336,14 +339,17 @@ export async function getRegistrationsWithStudents(eventId) {
     .select(`
       registration_id,
       student_id,
+      host_student_id,
       answers,
+      is_driver,
       registered_at,
+      updated_at,
       checked_in_at,
       terminal,
       students!student_id ( name, student_classes ( class_name, group_name ) )
     `)
     .eq('event_id', eventId)
-    .order('registered_at', { ascending: true })
+    .order('updated_at', { ascending: false })
 
   if (error) return { registrations: [], error: error.message }
   return { registrations: data || [], error: null }
@@ -458,7 +464,7 @@ export async function getCheckinStats(eventId) {
 /**
  * 後台手動新增訪客報名
  */
-export async function createGuestRegistration(eventId, guestName, answers) {
+export async function createGuestRegistration(eventId, guestName, answers, isDriver = false) {
   const allAnswers = { guest_name: guestName, ...answers }
   const { data, error } = await supabase
     .from('registrations')
@@ -467,6 +473,7 @@ export async function createGuestRegistration(eventId, guestName, answers) {
       student_id: null,
       answers: allAnswers,
       terminal: 'admin-guest',
+      is_driver: !!isDriver,
     })
     .select('registration_id')
     .single()
@@ -482,7 +489,7 @@ export async function createGuestRegistration(eventId, guestName, answers) {
  * answers 自動補上 guest_name 與「備註」欄（"XXX 親友"），讓後台名單看得出代報關係
  */
 export async function submitFriendRegistration(
-  eventId, hostStudentId, hostName, guestName, answers, terminal = 'tablet-01'
+  eventId, hostStudentId, hostName, guestName, answers, terminal = 'tablet-01', isDriver = false
 ) {
   const allAnswers = {
     guest_name: guestName,
@@ -497,6 +504,7 @@ export async function submitFriendRegistration(
       host_student_id: hostStudentId,
       answers: allAnswers,
       terminal,
+      is_driver: !!isDriver,
     })
     .select('registration_id')
     .single()
@@ -721,7 +729,9 @@ export async function getEventRegistrationsDetail(eventId) {
       student_id,
       host_student_id,
       answers,
+      is_driver,
       registered_at,
+      updated_at,
       students!student_id ( name, student_classes(class_name, group_name) )
     `)
     .eq('event_id', eventId)
@@ -869,21 +879,26 @@ export async function getHeadLeader(eventId) {
 }
 
 /**
- * 取得活動的小車領隊（type = 'small_car'）
+ * 取得活動的小車領隊（type = 'small_car'）— 回第一位（向後相容）
+ * 多領隊請改用 getSmallCarLeaders
  */
 export async function getSmallCarLeader(eventId) {
+  const { headLeaders } = await getSmallCarLeaders(eventId)
+  if (!headLeaders || headLeaders.length === 0) return { headLeader: null, error: null }
+  return { headLeader: headLeaders[0], error: null }
+}
+
+/**
+ * 取得活動的所有小車領隊（多選版）
+ */
+export async function getSmallCarLeaders(eventId) {
   const { data, error } = await supabase
     .from('head_leader')
     .select('registration_id, access_token')
     .eq('event_id', eventId)
     .eq('type', 'small_car')
-    .single()
-
-  if (error) {
-    if (error.code === 'PGRST116') return { headLeader: null, error: null }
-    return { headLeader: null, error: error.message }
-  }
-  return { headLeader: data, error: null }
+  if (error) return { headLeaders: [], error: error.message }
+  return { headLeaders: data || [], error: null }
 }
 
 /**
@@ -902,17 +917,43 @@ export async function setHeadLeader(eventId, registrationId) {
 }
 
 /**
- * 設定（或更新）活動的小車領隊
+ * 設定（或更新）活動的小車領隊（單一向後相容包裝）
  */
 export async function setSmallCarLeader(eventId, registrationId) {
-  const { error } = await supabase
-    .from('head_leader')
-    .upsert(
-      { event_id: eventId, registration_id: registrationId, type: 'small_car' },
-      { onConflict: 'event_id,type' }
-    )
+  if (!registrationId) return setSmallCarLeaders(eventId, [])
+  return setSmallCarLeaders(eventId, [registrationId])
+}
 
-  if (error) return { success: false, error: error.message }
+/**
+ * 全量替換活動的小車領隊清單（多選版）
+ * @param {string} eventId
+ * @param {string[]} registrationIds  registration_id 陣列；空陣列代表清空
+ */
+export async function setSmallCarLeaders(eventId, registrationIds = []) {
+  // 全量替換：先刪後插
+  const { error: delErr } = await supabase
+    .from('head_leader')
+    .delete()
+    .eq('event_id', eventId)
+    .eq('type', 'small_car')
+  if (delErr) return { success: false, error: delErr.message }
+
+  if (!registrationIds || registrationIds.length === 0) {
+    return { success: true, error: null }
+  }
+
+  // 去重
+  const uniq = [...new Set(registrationIds.filter(Boolean))]
+  const rows = uniq.map(rid => ({
+    event_id: eventId,
+    registration_id: rid,
+    type: 'small_car',
+  }))
+
+  const { error: insErr } = await supabase
+    .from('head_leader')
+    .insert(rows)
+  if (insErr) return { success: false, error: insErr.message }
   return { success: true, error: null }
 }
 

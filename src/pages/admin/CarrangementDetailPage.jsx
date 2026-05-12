@@ -10,10 +10,15 @@ import {
   saveCarArrangement,
   getHeadLeader,
   setHeadLeader as saveHeadLeader,
-  getSmallCarLeader,
-  setSmallCarLeader as saveSmallCarLeader,
+  getSmallCarLeaders,
+  setSmallCarLeaders as saveSmallCarLeaders,
   getMonks,
 } from '../../lib/supabase'
+import {
+  getPreceptLevel,
+  preceptBadgeProps,
+  isDriverFromAnswers,
+} from '../../lib/registrationHelpers'
 
 // ─── 常數與工具 ───────────────────────────────────────────────
 
@@ -114,6 +119,9 @@ function computeSmallGroups(regs, dir) {
 // ─── 自動排車演算法（B 架構：班級優先 + 三層 fallback） ────────
 //
 // 設計（2026-05-08 重寫，原架構「先放訪客親友群、後依班整合」會把整班拆散）：
+//   Step 0  ★（可選）三皈五戒群組獨佔車：把所有皈/戒學員 + 其親友 + 同 rel group
+//           的學員打包，獨佔最前面 N 台車（依人數動態決定）。被佔的車後續步驟不
+//           會再被選為目標（avail() 對 isPreceptCar 回 0），確保「行程獨立性」。
 //   Step 1  關係連結群組（跨班）優先放置 — 大群組先、tightest fit
 //   Step 2  建立 host+guest bundle（每位 host 學員與其所有訪客為原子單位）
 //   Step 3  班級聚合：每班所有 bundle 一起決定主車，整班可塞 → 全進；
@@ -127,7 +135,7 @@ function computeSmallGroups(regs, dir) {
 //
 // 回傳 { cars, warnings }，warnings = [{ kind, message, regIds, size, ... }]
 
-function autoArrange(largePeople, carCount, seats, relGroups) {
+function autoArrange(largePeople, carCount, seats, relGroups, options = {}) {
   const cars = Array.from({ length: carCount }, (_, i) => ({
     tempId: genId(),
     car_name: `第${chNum(i + 1)}車`,
@@ -135,6 +143,7 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
     members: [],
     leaders: [],
     monks: [],
+    isPreceptCar: false,   // 三皈五戒專車（不接受一般學員自動補位）
   }))
   const warnings = []
 
@@ -144,10 +153,68 @@ function autoArrange(largePeople, carCount, seats, relGroups) {
   const regLookup    = Object.fromEntries(largePeople.map(r => [r.registration_id, r]))
 
   const placed       = new Set()
-  const avail        = car => car.seats - car.members.length
-  const maxAvailCar  = () => cars.reduce((a, b) => avail(a) >= avail(b) ? a : b)
+  // 三皈五戒專車對自動補位回 0 空位（鎖死）；Step 0 自己用 push 直接放，不經 avail
+  const avail        = car => car.isPreceptCar ? 0 : car.seats - car.members.length
+  const maxAvailCar  = () => {
+    const free = cars.filter(c => !c.isPreceptCar)
+    if (free.length === 0) return cars[0]
+    return free.reduce((a, b) => avail(a) >= avail(b) ? a : b)
+  }
   const placeRegIds  = (car, regIds) => {
     for (const rid of regIds) { car.members.push(rid); placed.add(rid) }
+  }
+
+  // ── Step 0: 三皈五戒群組獨佔車 ────────────────────────────────
+  if (options.groupPrecept) {
+    const preceptRegIds = new Set()
+    // 1) 直接是 precept 的學員
+    for (const r of studentLarge) {
+      if (getPreceptLevel(r)) preceptRegIds.add(r.registration_id)
+    }
+    // 2) 同 rel group 連動：rel group 內任一人是 precept → 整組打包
+    for (const rg of relGroups) {
+      const memberRegs = (rg.relationship_members ?? [])
+        .map(m => studentToReg[m.student_id])
+        .filter(Boolean)
+      const hasPrecept = memberRegs.some(r => preceptRegIds.has(r.registration_id))
+      if (hasPrecept) {
+        for (const r of memberRegs) preceptRegIds.add(r.registration_id)
+      }
+    }
+    // 3) 親友：host 是 precept → 訪客打包
+    for (const guest of guestLarge) {
+      const host = findGuestHost(guest, studentLarge)
+      if (host && preceptRegIds.has(host.registration_id)) {
+        preceptRegIds.add(guest.registration_id)
+      }
+    }
+
+    if (preceptRegIds.size > 0) {
+      const seatPerCar = Number(seats)
+      const carsNeeded = Math.max(1, Math.ceil(preceptRegIds.size / seatPerCar))
+      const dedicated  = Math.min(carsNeeded, cars.length)
+
+      let remaining = [...preceptRegIds]
+      for (let i = 0; i < dedicated; i++) {
+        const car = cars[i]
+        car.isPreceptCar = true
+        car.car_name     = `${car.car_name}（皈戒專車）`
+        const take = remaining.slice(0, car.seats)
+        remaining  = remaining.slice(car.seats)
+        for (const rid of take) { car.members.push(rid); placed.add(rid) }
+      }
+
+      if (remaining.length > 0) {
+        warnings.push({
+          kind: 'precept_overflow',
+          regIds: remaining,
+          size: remaining.length,
+          message: `三皈五戒群組共 ${preceptRegIds.size} 人，目前 ${cars.length} 台車獨佔仍有 ${remaining.length} 人塞不下（請加開車次，或關閉皈戒同車選項）`,
+        })
+      } else if (carsNeeded > cars.length) {
+        // 理論上不會走到（remaining 為 0 表示已塞完）
+      }
+    }
   }
 
   // ── Step 1: 關係連結群組（跨班，最高優先） ─────────────────
@@ -403,12 +470,18 @@ function PersonRow({ reg, carIdx, cars, smallGroups, onMove, onToggleLeader, gue
   const cls      = getClasses(reg).map(c => [c.class_name, c.group_name].filter(Boolean).join(' ')).join('／')
   const isLeader = carIdx >= 0 && (cars[carIdx]?.leaders.includes(reg.registration_id) ?? false)
   const isGuest  = !reg.student_id
+  const preceptBadge = preceptBadgeProps(reg)
 
   return (
     <div className={`flex items-center gap-2 px-4 py-2 text-sm ${isGuest ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-amber-50'}`}>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="font-medium truncate">{name}</span>
+          {preceptBadge && (
+            <span className={preceptBadge.className} title={preceptBadge.title}>
+              {preceptBadge.children}
+            </span>
+          )}
           {isGuest && (
             <span className="text-xs text-blue-500 bg-blue-100 rounded px-1 shrink-0">訪客</span>
           )}
@@ -511,11 +584,14 @@ export default function CarrangementDetailPage() {
   // 自動排車警示（每次按 ✨ 自動排車後產出，依方向各一份；手動關閉或重排會清空）
   const [autoArrangeWarningsByDir, setAutoArrangeWarningsByDir] = useState({ up: [], down: [] })
 
-  // 領隊（上下山共用一位，不分方向）
-  const [headLeaderRegId, setHeadLeaderRegId]         = useState('')
-  const [headLeaderToken, setHeadLeaderToken]         = useState('')
-  const [smallCarLeaderRegId, setSmallCarLeaderRegId] = useState('')
-  const [smallCarLeaderToken, setSmallCarLeaderToken] = useState('')
+  // 自動排車選項：是否啟用「三皈五戒同車」（依方向各一份）
+  const [groupPreceptByDir, setGroupPreceptByDir] = useState({ up: false, down: false })
+
+  // 領隊（上下山共用，不分方向）
+  const [headLeaderRegId, setHeadLeaderRegId]   = useState('')
+  const [headLeaderToken, setHeadLeaderToken]   = useState('')
+  // 小車領隊改成多人：smallCarLeaders = [{ registration_id, access_token }]
+  const [smallCarLeaders, setSmallCarLeaders]   = useState([])
 
   const [allMonks, setAllMonks] = useState([])
   const [saving,  setSaving]    = useState(false)
@@ -529,6 +605,7 @@ export default function CarrangementDetailPage() {
   const orphanAssignments   = orphanByDir[direction]
   const guestSmallOverrides = guestSmallByDir[direction]
   const autoArrangeWarnings = autoArrangeWarningsByDir[direction]
+  const groupPrecept        = groupPreceptByDir[direction]
 
   // setter helpers（包成只改目前方向）
   const setCars = updater => setCarsByDir(prev => {
@@ -546,6 +623,7 @@ export default function CarrangementDetailPage() {
     return { ...prev, [direction]: next }
   })
   const setAutoArrangeWarnings = v => setAutoArrangeWarningsByDir(prev => ({ ...prev, [direction]: v }))
+  const setGroupPrecept        = v => setGroupPreceptByDir(prev => ({ ...prev, [direction]: v }))
 
   // ── 衍生資料（含訪客）──
   const regMap      = useMemo(() => Object.fromEntries(regs.map(r => [r.registration_id, r])), [regs])
@@ -614,7 +692,7 @@ export default function CarrangementDetailPage() {
       { cars: savedCarsUp },
       { cars: savedCarsDown },
       { headLeader },
-      { headLeader: smallCarLeader },
+      { headLeaders: smallCarLeaderList },
       { monks: monkList },
     ] = await Promise.all([
       getAllEvents(),
@@ -623,7 +701,7 @@ export default function CarrangementDetailPage() {
       getCarArrangement(eventId, 'up'),
       getCarArrangement(eventId, 'down'),
       getHeadLeader(eventId),
-      getSmallCarLeader(eventId),
+      getSmallCarLeaders(eventId),
       getMonks(),
     ])
     setAllMonks(monkList ?? [])
@@ -645,10 +723,7 @@ export default function CarrangementDetailPage() {
       setHeadLeaderRegId(headLeader.registration_id ?? '')
       setHeadLeaderToken(headLeader.access_token ?? '')
     }
-    if (smallCarLeader) {
-      setSmallCarLeaderRegId(smallCarLeader.registration_id ?? '')
-      setSmallCarLeaderToken(smallCarLeader.access_token ?? '')
-    }
+    setSmallCarLeaders(smallCarLeaderList ?? [])
     setLoading(false)
   }
 
@@ -696,7 +771,13 @@ export default function CarrangementDetailPage() {
   function handleAutoArrange() {
     if (largePeople.length === 0) { alert('此方向沒有搭精舍車的學員'); return }
     if (cars.length > 0 && !window.confirm(`自動排車會覆蓋目前「${dirLabel(direction)}」的排法，確定繼續？`)) return
-    const { cars: newCars, warnings } = autoArrange(largePeople, Number(carCount), Number(seatsPerCar), relGroups)
+    const { cars: newCars, warnings } = autoArrange(
+      largePeople,
+      Number(carCount),
+      Number(seatsPerCar),
+      relGroups,
+      { groupPrecept }
+    )
     setCars(newCars)
     setAutoArrangeWarnings(warnings)
   }
@@ -865,15 +946,14 @@ export default function CarrangementDetailPage() {
     const upSmall   = calcFinalSmall('up')
     const downSmall = calcFinalSmall('down')
 
+    const smallCarLeaderRegIds = smallCarLeaders.map(l => l.registration_id).filter(Boolean)
     const [upRes, downRes, hlRes, sclRes] = await Promise.all([
       saveCarArrangement(eventId, carsByDir.up,   upSmall,   'up'),
       saveCarArrangement(eventId, carsByDir.down, downSmall, 'down'),
       headLeaderRegId
         ? saveHeadLeader(eventId, headLeaderRegId)
         : Promise.resolve({ success: true }),
-      smallCarLeaderRegId
-        ? saveSmallCarLeader(eventId, smallCarLeaderRegId)
-        : Promise.resolve({ success: true }),
+      saveSmallCarLeaders(eventId, smallCarLeaderRegIds),
     ])
 
     setSaving(false)
@@ -1089,6 +1169,16 @@ export default function CarrangementDetailPage() {
                 onChange={e => setSeatsPerCar(e.target.value)}
                 className="w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
               />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-emerald-800 bg-emerald-50 border border-emerald-300 rounded-lg px-3 py-2 self-end cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={groupPrecept}
+                onChange={e => setGroupPrecept(e.target.checked)}
+                className="accent-emerald-600"
+              />
+              <span>優先將三皈五戒學員及其親友編入同一車</span>
+              <span className="text-xs text-emerald-600">（行程獨立，不自動補位）</span>
             </label>
             <button
               onClick={handleAutoArrange}
@@ -1492,41 +1582,69 @@ export default function CarrangementDetailPage() {
           </section>
         )}
 
-        {/* ── 小車領隊（上下山共用） ── */}
+        {/* ── 小車領隊（上下山共用，可多人） ── */}
         <section>
           <h2 className="text-base font-bold text-gray-700 mb-3">
             🚗 小車領隊
-            <span className="text-xs font-normal text-gray-400 ml-2">（上下山共用）</span>
+            <span className="text-xs font-normal text-gray-400 ml-2">（上下山共用、可多人）</span>
           </h2>
+          {/* 已選清單 */}
+          {smallCarLeaders.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {smallCarLeaders.map(l => {
+                const reg  = regMap[l.registration_id]
+                const name = reg ? getName(reg) : '(已移除)'
+                return (
+                  <div key={l.registration_id} className="bg-green-50 border border-green-300 rounded-lg px-2.5 py-1.5 text-sm flex items-center gap-2">
+                    <span className="font-medium text-green-800">{name}</span>
+                    {l.access_token ? (
+                      <button
+                        onClick={() => copyLink(l.access_token, `小車領隊・${name}`)}
+                        className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                      >
+                        🔗 複製連結
+                      </button>
+                    ) : (
+                      <span className="text-xs text-gray-400">（儲存後可複製）</span>
+                    )}
+                    <button
+                      onClick={() => setSmallCarLeaders(prev => prev.filter(x => x.registration_id !== l.registration_id))}
+                      className="text-red-400 hover:text-red-600 text-base leading-none"
+                      title="移除"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {/* 新增領隊 */}
           <div className="flex items-center gap-3 flex-wrap">
             <SearchableSelect
-              value={smallCarLeaderRegId}
-              onChange={setSmallCarLeaderRegId}
+              value=""
+              onChange={rid => {
+                if (!rid) return
+                if (smallCarLeaders.some(l => l.registration_id === rid)) return
+                setSmallCarLeaders(prev => [...prev, { registration_id: rid, access_token: '' }])
+              }}
               className="w-full max-w-xs"
-              placeholder="（未設定）"
-              options={regs.filter(r => r.student_id).map(r => {
-                const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
-                return {
-                  value: r.registration_id,
-                  label: getName(r),
-                  sublabel: cls,
-                  searchText: `${getName(r)} ${cls} ${r.student_id ?? ''}`,
-                }
-              })}
+              placeholder="＋ 加入小車領隊（可重複加入）"
+              options={regs
+                .filter(r => r.student_id && !smallCarLeaders.some(l => l.registration_id === r.registration_id))
+                .map(r => {
+                  const cls = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
+                  return {
+                    value: r.registration_id,
+                    label: getName(r),
+                    sublabel: cls,
+                    searchText: `${getName(r)} ${cls} ${r.student_id ?? ''}`,
+                  }
+                })}
             />
-            {smallCarLeaderToken ? (
-              <button
-                onClick={() => copyLink(smallCarLeaderToken, '小車領隊')}
-                className="px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
-              >
-                🔗 複製小車領隊連結
-              </button>
-            ) : (
-              <span className="text-xs text-gray-400">（儲存後可複製連結）</span>
-            )}
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            小車領隊可查看並操作所有小車成員的報到狀況（含上山與下山）。<br />
+            小車領隊可查看並操作所有小車成員的報到狀況（含上山與下山）。可設定多位領隊分擔任務，每位都有獨立的連結。<br />
             ⚠️ 每次儲存後連結會更新，請重新複製。
           </p>
         </section>

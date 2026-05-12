@@ -68,11 +68,28 @@ CREATE TABLE IF NOT EXISTS registrations (
   student_id      TEXT REFERENCES students(student_id) ON DELETE SET NULL,  -- NULL = 訪客
   host_student_id TEXT,                                                     -- 訪客被誰代報（不加 FK 避免 PostgREST 歧義）
   answers         JSONB NOT NULL DEFAULT '{}',
+  is_driver       BOOLEAN NOT NULL DEFAULT false,                           -- 小車自開場景（含車號欄位）= true
   registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),                       -- INSERT/UPDATE 都會推進；名單顯示用
   checked_in_at   TIMESTAMPTZ,
   terminal        TEXT,
   UNIQUE (event_id, student_id)  -- 同一學員同一活動只能報名一次（訪客不受此限）
 );
+
+-- 自動更新 updated_at 的 trigger
+CREATE OR REPLACE FUNCTION touch_registrations_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_registrations_touch ON registrations;
+CREATE TRIGGER trg_registrations_touch
+  BEFORE UPDATE ON registrations
+  FOR EACH ROW
+  EXECUTE FUNCTION touch_registrations_updated_at();
 
 -- 稽核日誌表
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -92,6 +109,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_registrations_event_id   ON registrations(event_id);
 CREATE INDEX IF NOT EXISTS idx_registrations_student_id ON registrations(student_id);
 CREATE INDEX IF NOT EXISTS idx_registrations_host       ON registrations(host_student_id, event_id) WHERE host_student_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_registrations_updated_at ON registrations(event_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_event_fields_event_id    ON event_fields(event_id);
 CREATE INDEX IF NOT EXISTS idx_student_classes_student  ON student_classes(student_id);
 

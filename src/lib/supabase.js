@@ -67,6 +67,25 @@ export async function getActiveEvents() {
 }
 
 /**
+ * 取得學員代報過的親友報名（host_student_id 指向該學員）
+ * 前台 OverviewScreen 顯示「您代報的親友」列表用
+ * @returns {{ registrations: Array, error: string|null }}
+ *   每筆含：registration_id, event_id, answers, registered_at, updated_at
+ */
+export async function getFriendRegistrationsByHost(studentId, eventIds) {
+  if (!studentId) return { registrations: [], error: null }
+  let q = supabase
+    .from('registrations')
+    .select('registration_id, event_id, answers, registered_at, updated_at')
+    .eq('host_student_id', studentId)
+    .order('updated_at', { ascending: false })
+  if (eventIds && eventIds.length > 0) q = q.in('event_id', eventIds)
+  const { data, error } = await q
+  if (error) return { registrations: [], error: error.message }
+  return { registrations: data || [], error: null }
+}
+
+/**
  * 取得學員在多場活動中的報名狀態
  * @returns {{ [eventId]: registration|null }}
  */

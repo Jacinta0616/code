@@ -4,6 +4,7 @@ import {
   getActiveEvents,
   getStudentById,
   getStudentEventStatuses,
+  getFriendRegistrationsByHost,
   submitRegistration,
   updateRegistration,
   deleteRegistration,
@@ -14,35 +15,70 @@ import DynamicForm from '../components/DynamicForm'
 import CameraScanner from '../components/CameraScanner'
 import { isDriverFromAnswers } from '../lib/registrationHelpers'
 
-// ── QR Code 下載 ─────────────────────────────────────────────
-// 把 <svg id> 轉成 PNG，給「下載個人 QR Card」按鈕用
-function downloadQRPng(svgId, filename) {
-  const svg = document.getElementById(svgId)
-  if (!svg) return
-  const xml = new XMLSerializer().serializeToString(svg)
-  const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' })
-  const url = URL.createObjectURL(svgBlob)
-  const img = new Image()
-  img.onload = () => {
-    const size = 600
-    const canvas = document.createElement('canvas')
-    canvas.width = size
-    canvas.height = size
-    const ctx = canvas.getContext('2d')
-    ctx.fillStyle = '#fff'
-    ctx.fillRect(0, 0, size, size)
-    ctx.drawImage(img, 0, 0, size, size)
-    URL.revokeObjectURL(url)
-    canvas.toBlob(blob => {
-      if (!blob) return
-      const link = document.createElement('a')
-      link.href = URL.createObjectURL(blob)
-      link.download = filename
-      link.click()
-      setTimeout(() => URL.revokeObjectURL(link.href), 1000)
-    }, 'image/png')
+// ── QR Code 下載 / 分享 ──────────────────────────────────────
+// 把 <svg id> 轉成 PNG Blob（內部用）
+function svgToPngBlob(svgId, size = 600) {
+  return new Promise((resolve, reject) => {
+    const svg = document.getElementById(svgId)
+    if (!svg) { reject(new Error('SVG not found')); return }
+    const xml = new XMLSerializer().serializeToString(svg)
+    const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(svgBlob)
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#fff'
+      ctx.fillRect(0, 0, size, size)
+      ctx.drawImage(img, 0, 0, size, size)
+      URL.revokeObjectURL(url)
+      canvas.toBlob(blob => {
+        if (!blob) reject(new Error('Canvas toBlob failed'))
+        else resolve(blob)
+      }, 'image/png')
+    }
+    img.onerror = reject
+    img.src = url
+  })
+}
+
+// 下載 PNG
+async function downloadQRPng(svgId, filename) {
+  try {
+    const blob = await svgToPngBlob(svgId)
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = filename
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+  } catch (e) {
+    console.warn('[downloadQRPng]', e)
+    alert('下載失敗，請稍後再試')
   }
-  img.src = url
+}
+
+// 分享 PNG（Web Share API；不支援時 fallback 下載）
+async function shareQRPng(svgId, filename, title, text) {
+  try {
+    const blob = await svgToPngBlob(svgId)
+    const file = new File([blob], filename, { type: 'image/png' })
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title, text })
+      return
+    }
+    // 不支援 → fallback 下載
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = filename
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+  } catch (e) {
+    if (e.name === 'AbortError') return  // 使用者取消分享
+    console.warn('[shareQRPng]', e)
+    alert('分享失敗，請改用下載')
+  }
 }
 
 const OVERVIEW_IDLE_SECONDS = 30   // 總覽畫面閒置幾秒後自動返回
@@ -74,6 +110,11 @@ export default function KioskPage() {
   const [friendMode, setFriendMode] = useState(null) // null | 'friend'（只代親友，不再有「本人+親友」綁定模式）
   const [friendName, setFriendName] = useState('')
   const [friendAnswers, setFriendAnswers] = useState({})
+  // 上次代報成功的 registration_id（給 success 畫面產 QR 用）
+  const [lastFriendRegId, setLastFriendRegId] = useState('')
+  const [lastFriendEventName, setLastFriendEventName] = useState('')
+  // 該學員代報過的所有親友清單（OverviewScreen 顯示用）
+  const [friendRegistrations, setFriendRegistrations] = useState([])
 
   const [cameraOpen, setCameraOpen] = useState(false)
   const [cancellingEventId, setCancellingEventId] = useState(null) // 正在確認取消的活動 ID
@@ -136,10 +177,11 @@ export default function KioskPage() {
     setPhase('loading')
     const eventIds = eventItems.map(i => i.event.event_id)
 
-    // 學員資料與報名狀態並行查詢（code === student_id），減少等待時間
-    const [studentResult, statusResult] = await Promise.all([
+    // 學員資料、報名狀態、代報親友三項並行查詢，減少等待時間
+    const [studentResult, statusResult, friendResult] = await Promise.all([
       getStudentById(code),
       getStudentEventStatuses(code, eventIds),
+      getFriendRegistrationsByHost(code, eventIds),
     ])
 
     const { student, classes, error } = studentResult
@@ -147,10 +189,12 @@ export default function KioskPage() {
     if (error) { setPhase('error'); setErrorMsg(error); scheduleAutoReset(5); return }
 
     const { map: statusMap, error: statusErr } = statusResult
+    const { registrations: friendRegs } = friendResult
 
     setStudent(student)
     setClasses(classes)
     setStatuses(statusMap)
+    setFriendRegistrations(friendRegs || [])
     if (statusErr) setErrorMsg(`報名狀態查詢失敗：${statusErr}`)
     else setErrorMsg('')
     setPhase('overview')
@@ -239,7 +283,20 @@ export default function KioskPage() {
     // 報名成功 → 進入「再代報一位 / 完成返回」選擇畫面
     // friendName 留著給 success 畫面顯示，由下一步動作清空
     setSuccessEventName(`${event.name}（${name} 親友）`)
+    setLastFriendRegId(registrationId)
+    setLastFriendEventName(event.name)
     setFriendAnswers({})
+    // 即時更新「您代報的親友」清單（不必重新查 DB）
+    setFriendRegistrations(prev => [
+      {
+        registration_id: registrationId,
+        event_id: event.event_id,
+        answers: { guest_name: name, 備註: `${student.name} 親友`, ...friendAnswers },
+        registered_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      ...prev,
+    ])
     setPhase('friend_success')
     startIdleTimer()
   }
@@ -387,6 +444,9 @@ export default function KioskPage() {
     setFriendMode(null)
     setFriendName('')
     setFriendAnswers({})
+    setLastFriendRegId('')
+    setLastFriendEventName('')
+    setFriendRegistrations([])
     setPhase(eventItems.length ? 'idle' : 'no_event')
   }
 
@@ -432,6 +492,7 @@ export default function KioskPage() {
             classes={classes}
             eventItems={eventItems}
             statuses={statuses}
+            friendRegistrations={friendRegistrations}
             showSuccess={showSuccess}
             successEventName={successEventName}
             cancellingEventId={cancellingEventId}
@@ -494,6 +555,8 @@ export default function KioskPage() {
             studentName={student?.name ?? ''}
             friendName={friendName}
             eventName={successEventName}
+            friendRegId={lastFriendRegId}
+            friendEventName={lastFriendEventName}
             onContinue={handleContinueFriend}
             onDone={handleDoneFriend}
           />
@@ -571,10 +634,19 @@ function ErrorScreen({ message, onReset }) {
 
 // ── 總覽畫面：所有活動報名狀態 ────────────────────────────
 function OverviewScreen({
-  student, classes, eventItems, statuses, showSuccess, successEventName,
+  student, classes, eventItems, statuses, friendRegistrations = [],
+  showSuccess, successEventName,
   cancellingEventId, errorMsg, onSelectEvent, onRequestCancel, onConfirmCancel,
   onStartFriendFlow, onDone,
 }) {
+  // 把代報親友依活動分組（同一場活動的親友列在一起）
+  const friendsByEvent = friendRegistrations.reduce((acc, fr) => {
+    if (!acc[fr.event_id]) acc[fr.event_id] = []
+    acc[fr.event_id].push(fr)
+    return acc
+  }, {})
+  const eventNameMap = Object.fromEntries(eventItems.map(({ event }) => [event.event_id, event.name]))
+  const eventFieldsMap = Object.fromEntries(eventItems.map(({ event, fields }) => [event.event_id, fields]))
   return (
     <div className="w-full max-w-lg">
       {/* 報名狀態查詢失敗提示 */}
@@ -600,34 +672,6 @@ function OverviewScreen({
           ))}
         </div>
 
-        {/* 個人 QR Code Accordion（學員證遺失時可下載備用） */}
-        {student?.student_id && (
-          <details className="mt-3 group">
-            <summary className="cursor-pointer text-kiosk-sm text-blue-700 hover:text-blue-900 select-none list-none flex items-center gap-1">
-              <span className="inline-block transition-transform group-open:rotate-90">▶</span>
-              我的學員證 QR Code
-            </summary>
-            <div className="mt-3 flex flex-col sm:flex-row items-center gap-4 bg-gray-50 rounded-xl p-4">
-              <QRCodeSVG
-                id="kiosk-student-qr"
-                value={String(student.student_id)}
-                size={144}
-                level="M"
-                includeMargin
-              />
-              <div className="flex-1 min-w-0 text-center sm:text-left">
-                <p className="text-kiosk-sm text-gray-500">學員編號</p>
-                <p className="font-mono text-kiosk-base text-gray-800 break-all">{student.student_id}</p>
-                <button
-                  onClick={() => downloadQRPng('kiosk-student-qr', `${student.name || 'qr'}_${student.student_id}.png`)}
-                  className="mt-3 inline-flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-xl text-kiosk-sm font-medium active:scale-95 transition-transform"
-                >
-                  📥 下載 QR Code（PNG）
-                </button>
-              </div>
-            </div>
-          </details>
-        )}
       </div>
 
       {/* 報名成功提示 */}
@@ -687,10 +731,10 @@ function OverviewScreen({
                     }, [])
                     if (items.length === 0) return null
                     return (
-                      <details className="mt-3 group" open>
+                      <details className="mt-3 group">
                         <summary className="cursor-pointer text-kiosk-sm text-blue-700 hover:text-blue-900 select-none list-none flex items-center gap-1 mb-1">
                           <span className="inline-block transition-transform group-open:rotate-90">▶</span>
-                          <span>報名資料（共 {items.length} 項）</span>
+                          <span>查看報名資料（{items.length} 項）</span>
                         </summary>
                         <div className="space-y-2 pt-1">
                           {items.map((item, idx) => (
@@ -791,22 +835,89 @@ function OverviewScreen({
         })}
       </div>
 
-      {/* 為親友代報區塊 */}
+      {/* 為親友代報區塊：入口按鈕 + 已代報親友清單 */}
       {(() => {
-        const hasOpenEvent = eventItems.some(({ event }) => !event.locked)
-        if (!hasOpenEvent) return null
+        const hasOpenEvent  = eventItems.some(({ event }) => !event.locked)
+        const hasFriends    = friendRegistrations.length > 0
+        if (!hasOpenEvent && !hasFriends) return null
         return (
           <div className="bg-purple-50 border-2 border-purple-200 rounded-2xl p-4 mb-5">
-            <button
-              onClick={() => onStartFriendFlow()}
-              className="w-full py-4 px-4 bg-white border-2 border-purple-400 text-purple-700 rounded-xl text-kiosk-base font-bold active:scale-95 transition-transform shadow-sm"
-            >
-              ＋ 代為幫親友報名
-            </button>
-            <p className="text-kiosk-sm text-purple-500 mt-3 leading-snug">
-              可幫尚未到場的家人或朋友報名（不影響您自己的報名）。
-              後台會自動標註「{student?.name ?? '您'} 親友」並安排同車。
-            </p>
+            {hasOpenEvent && (
+              <>
+                <button
+                  onClick={() => onStartFriendFlow()}
+                  className="w-full py-4 px-4 bg-white border-2 border-purple-400 text-purple-700 rounded-xl text-kiosk-base font-bold active:scale-95 transition-transform shadow-sm"
+                >
+                  ＋ 代為幫親友報名
+                </button>
+                <p className="text-kiosk-sm text-purple-500 mt-3 leading-snug">
+                  可幫尚未到場的家人或朋友報名（不影響您自己的報名）。
+                  後台會自動標註「{student?.name ?? '您'} 親友」並安排同車。
+                </p>
+              </>
+            )}
+
+            {/* 已代報的親友清單 — 預設摺疊，避免畫面太長 */}
+            {hasFriends && (
+              <details className={`group ${hasOpenEvent ? 'mt-4 pt-3 border-t border-purple-200' : ''}`}>
+                <summary className="cursor-pointer text-kiosk-sm font-bold text-purple-700 select-none list-none flex items-center gap-1.5">
+                  <span className="inline-block transition-transform group-open:rotate-90">▶</span>
+                  您代報的親友（共 {friendRegistrations.length} 筆）
+                </summary>
+                <div className="mt-3 space-y-2">
+                  {Object.entries(friendsByEvent).map(([eventId, friends]) => {
+                    const evName = eventNameMap[eventId] || '（未知活動）'
+                    const evFields = eventFieldsMap[eventId] || []
+                    return (
+                      <div key={eventId} className="bg-white border border-purple-200 rounded-xl p-3">
+                        <p className="text-kiosk-sm font-semibold text-gray-700 mb-2">📅 {evName}</p>
+                        <div className="space-y-2">
+                          {friends.map(fr => {
+                            const guestName = fr.answers?.guest_name || '訪客'
+                            const items = evFields.reduce((acc, f) => {
+                              const v = fr.answers?.[f.field_key]
+                              if (v === undefined || v === null || v === '') return acc
+                              let display
+                              if (f.field_type === 'boolean') {
+                                display = v === true ? '是' : v === false ? '否' : ''
+                              } else if (Array.isArray(v)) {
+                                display = v.join('、')
+                              } else {
+                                display = v
+                              }
+                              if (!display && display !== 0) return acc
+                              acc.push({ key: f.field_key, label: f.field_label, display })
+                              return acc
+                            }, [])
+                            return (
+                              <div key={fr.registration_id} className="bg-purple-50 rounded-lg px-3 py-2">
+                                <p className="text-kiosk-sm font-bold text-purple-800">{guestName}</p>
+                                {items.length > 0 && (
+                                  <details className="mt-1 group/inner">
+                                    <summary className="cursor-pointer text-kiosk-sm text-purple-600 select-none list-none flex items-center gap-1">
+                                      <span className="inline-block transition-transform group-open/inner:rotate-90">▶</span>
+                                      <span>查看資料（{items.length} 項）</span>
+                                    </summary>
+                                    <div className="mt-1.5 space-y-1 pl-3">
+                                      {items.map(item => (
+                                        <div key={item.key} className="text-kiosk-sm">
+                                          <span className="text-purple-600">{item.label}：</span>
+                                          <span className="text-gray-800 font-medium">{item.display}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </details>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </details>
+            )}
           </div>
         )
       })()}
@@ -1004,13 +1115,18 @@ function FriendFormScreen({
   )
 }
 
-// ── 親友代報：送出成功，連續代報入口 ────────────────────────
-function FriendSuccessScreen({ studentName, friendName, eventName, onContinue, onDone }) {
+// ── 親友代報：送出成功，QR Code + 連續代報入口 ──────────────
+function FriendSuccessScreen({ studentName, friendName, eventName, friendRegId, friendEventName, onContinue, onDone }) {
+  const qrSvgId = 'friend-success-qr'
+  const qrFilename = `${friendName || 'friend'}_${friendEventName || ''}_QR.png`
+    .replace(/[<>:"/\\|?*\s]/g, '_')
+    .slice(0, 80)
+
   return (
     <div className="w-full max-w-lg">
-      <div className="bg-green-50 border-2 border-green-400 rounded-2xl px-6 py-8 mb-5 text-center">
-        <div className="text-6xl mb-3">✅</div>
-        <p className="text-kiosk-xl font-bold text-green-800 mb-2">代報完成</p>
+      <div className="bg-green-50 border-2 border-green-400 rounded-2xl px-6 py-6 mb-4 text-center">
+        <div className="text-5xl mb-2">✅</div>
+        <p className="text-kiosk-xl font-bold text-green-800 mb-1">代報完成</p>
         <p className="text-kiosk-base text-gray-700">
           已成功為 <span className="font-bold text-purple-700">{friendName}</span> 報名
         </p>
@@ -1019,7 +1135,42 @@ function FriendSuccessScreen({ studentName, friendName, eventName, onContinue, o
         )}
       </div>
 
-      <div className="bg-purple-50 border-2 border-purple-200 rounded-2xl p-4 mb-4">
+      {/* 訪客 QR Code（給親友報到用） */}
+      {friendRegId && (
+        <div className="bg-white border-2 border-purple-200 rounded-2xl p-4 mb-4">
+          <p className="text-kiosk-sm font-bold text-purple-700 mb-3 text-center">
+            🎫 {friendName} 的報到 QR Code
+          </p>
+          <div className="flex justify-center mb-3 bg-gray-50 rounded-xl p-3">
+            <QRCodeSVG
+              id={qrSvgId}
+              value={String(friendRegId)}
+              size={160}
+              level="M"
+              includeMargin
+            />
+          </div>
+          <p className="text-kiosk-sm text-gray-500 text-center mb-3 leading-snug">
+            請傳給 {friendName}，當天現場掃描即可報到。
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => downloadQRPng(qrSvgId, qrFilename)}
+              className="py-3 px-3 bg-white border-2 border-purple-300 text-purple-700 rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
+            >
+              📥 下載
+            </button>
+            <button
+              onClick={() => shareQRPng(qrSvgId, qrFilename, `${friendName} 報到 QR`, `${friendEventName || ''} - ${friendName} 的報到 QR Code`)}
+              className="py-3 px-3 bg-purple-600 text-white rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
+            >
+              📤 分享給親友
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-purple-50 border-2 border-purple-200 rounded-2xl p-3 mb-4">
         <p className="text-kiosk-sm text-purple-700 leading-snug">
           {studentName} 師兄您好，要繼續為下一位親友代報嗎？
         </p>

@@ -173,14 +173,23 @@ function computeDashboardStats(regs, fields) {
 
 // 精舍活動：午齋 / 停車（機車、轎車）統計
 //
-// 停車輛數的計算方式：
-// - 若名單中有任何報名標記 is_driver=true（場景：有「車號」plate 欄位的活動），
-//   進入「司機模式」— 只計司機本人，避免共乘者重複佔位（同台車多人都選「轎車」會被算成多輛）。
-// - 若名單完全沒有 is_driver=true（舊活動 / 未啟用車號欄位），維持舊行為計人頭。
+// 停車輛數的計算方式（車號去重模式）：
+// - 若欄位定義中有 plate 型別欄位、且名單中有任何人填了車號
+//   → 進入「車號去重」模式：以車號為單位 group by，每個獨特車號算 1 台
+//   → 同車號的其他人視為共乘者（不重複計）
+// - 沒填車號但選了機車／轎車的人 → 視為各自一台（向下相容、避免漏算）
+// - 完全沒 plate 欄位（舊活動）→ 退回單純計人頭模式
+//
+// 車號標準化：大寫 + 移除空白與連字號（避免 "ABC-1234" 和 "abc 1234" 算成兩台）
+function normalizePlate(s) {
+  return String(s || '').trim().toUpperCase().replace(/[\s\-－—]/g, '')
+}
+
 function computeTempleStats(regs, fields) {
   const identityField = fields.find(f => f.field_key === 'identity')
   const lunchField    = fields.find(f => f.field_key === 'need_lunch')
   const parkingField  = fields.find(f => f.field_key === 'parking_type')
+  const plateFields   = fields.filter(f => f.field_type === 'plate')
 
   const identityCounts = {}
   if (identityField) {
@@ -190,27 +199,49 @@ function computeTempleStats(regs, fields) {
     }
   }
 
-  const driverAware = regs.some(r => r.is_driver === true)
+  // 偵測是否啟用車號去重模式
+  const platesEnabled = plateFields.length > 0 && regs.some(r =>
+    plateFields.some(pf => {
+      const v = r.answers?.[pf.field_key]
+      return v && String(v).trim() !== ''
+    })
+  )
 
   let lunchCount = 0
   let motorcycle = 0
   let car = 0
+  const seenPlates = new Set()   // 已計入的標準化車號
+
   for (const r of regs) {
     if (lunchField && r.answers?.[lunchField.field_key] === true) lunchCount++
-    if (parkingField) {
-      const val = r.answers?.[parkingField.field_key]
-      if (!val) continue
-      if (driverAware && !r.is_driver) continue   // 司機模式：非司機跳過
-      if (val === '機車') motorcycle++
-      else if (val === '轎車') car++
+    if (!parkingField) continue
+
+    const val = r.answers?.[parkingField.field_key]
+    if (val !== '機車' && val !== '轎車') continue   // 「跟 OOO 同車」或未填都跳過
+
+    if (platesEnabled) {
+      // 找第一個非空的車號欄位
+      let plate = ''
+      for (const pf of plateFields) {
+        const v = r.answers?.[pf.field_key]
+        if (v && String(v).trim()) { plate = normalizePlate(v); break }
+      }
+      if (plate) {
+        if (seenPlates.has(plate)) continue   // 同車號已計入 → 共乘者，跳過
+        seenPlates.add(plate)
+      }
+      // plate 空（沒填車號）→ 維持「視為一台」的舊行為
     }
+
+    if (val === '機車') motorcycle++
+    else if (val === '轎車') car++
   }
 
   return {
     identityField, identityCounts,
     hasLunch: !!lunchField, lunchCount,
     hasParking: !!parkingField, motorcycle, car,
-    driverAware,
+    plateDedup: platesEnabled,
   }
 }
 

@@ -1430,3 +1430,201 @@ export async function getAllStudents(search = '') {
   if (error) return { students: [], error: error.message }
   return { students: data || [], error: null }
 }
+
+
+// ─── 功德主管理（event_donors）─────────────────────────────
+// 設計重點：
+//   - 學員型：student_id 有值，唯一鍵 (event_id, student_id)
+//   - 訪客型：student_id=null，唯一鍵 (event_id, name)
+//   - 顯示欄位（donor_item / seat / corsage / offering / donor_note）任一空白 → 報到時不顯示該列
+//   - bulkUpsertEventDonors 採「合併」策略：依鍵 lookup，有則 UPDATE，沒則 INSERT；不刪除既有
+
+const DONOR_COLS = 'donor_id, event_id, student_id, name, donor_item, seat, corsage, offering, donor_note, created_at, updated_at'
+
+export async function listEventDonors(eventId) {
+  const { data, error } = await supabase
+    .from('event_donors')
+    .select(DONOR_COLS)
+    .eq('event_id', eventId)
+    .order('created_at', { ascending: true })
+
+  if (error) return { donors: [], error: error.message }
+  return { donors: data || [], error: null }
+}
+
+export async function addEventDonor(eventId, donor) {
+  // donor = { student_id?, name, donor_item?, seat?, corsage?, offering?, donor_note? }
+  const row = {
+    event_id:   eventId,
+    student_id: donor.student_id || null,
+    name:       (donor.name || '').trim(),
+    donor_item: emptyToNull(donor.donor_item),
+    seat:       emptyToNull(donor.seat),
+    corsage:    emptyToNull(donor.corsage),
+    offering:   emptyToNull(donor.offering),
+    donor_note: emptyToNull(donor.donor_note),
+  }
+  if (!row.name) return { donor: null, error: '姓名不可為空' }
+
+  const { data, error } = await supabase
+    .from('event_donors')
+    .insert(row)
+    .select(DONOR_COLS)
+    .single()
+
+  if (error) return { donor: null, error: error.message }
+  return { donor: data, error: null }
+}
+
+export async function updateEventDonor(donorId, patch) {
+  const row = {}
+  if (patch.name !== undefined)       row.name       = (patch.name || '').trim()
+  if (patch.student_id !== undefined) row.student_id = patch.student_id || null
+  if (patch.donor_item !== undefined) row.donor_item = emptyToNull(patch.donor_item)
+  if (patch.seat !== undefined)       row.seat       = emptyToNull(patch.seat)
+  if (patch.corsage !== undefined)    row.corsage    = emptyToNull(patch.corsage)
+  if (patch.offering !== undefined)   row.offering   = emptyToNull(patch.offering)
+  if (patch.donor_note !== undefined) row.donor_note = emptyToNull(patch.donor_note)
+
+  if (row.name !== undefined && !row.name) return { donor: null, error: '姓名不可為空' }
+
+  const { data, error } = await supabase
+    .from('event_donors')
+    .update(row)
+    .eq('donor_id', donorId)
+    .select(DONOR_COLS)
+    .single()
+
+  if (error) return { donor: null, error: error.message }
+  return { donor: data, error: null }
+}
+
+export async function deleteEventDonor(donorId) {
+  const { error } = await supabase
+    .from('event_donors')
+    .delete()
+    .eq('donor_id', donorId)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
+/**
+ * 批次匯入功德主（合併策略）
+ *   rows: [{ student_id?, name, donor_item?, seat?, corsage?, offering?, donor_note? }]
+ *   - 學員型（有 student_id）：以 (event_id, student_id) 比對；有則 update，無則 insert
+ *   - 訪客型（無 student_id）：以 (event_id, name) 比對；有則 update，無則 insert
+ *   不刪除 Excel 以外的既有名單。
+ *
+ *   回傳 { success, inserted, updated, errors: [{ row, message }] }
+ */
+export async function bulkUpsertEventDonors(eventId, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { success: true, inserted: 0, updated: 0, errors: [] }
+  }
+
+  // 先撈出該活動的全部 donors 一次性比對（避免 N 次往返）
+  const { donors: existing, error: listErr } = await listEventDonors(eventId)
+  if (listErr) return { success: false, inserted: 0, updated: 0, errors: [{ row: null, message: listErr }] }
+
+  // 建兩個 lookup map
+  const byStudent = new Map() // student_id → donor
+  const byName    = new Map() // name → donor (僅訪客型)
+  for (const d of existing) {
+    if (d.student_id) byStudent.set(d.student_id, d)
+    else              byName.set(d.name, d)
+  }
+
+  const errors = []
+  let inserted = 0, updated = 0
+
+  for (const raw of rows) {
+    const studentId = raw.student_id ? String(raw.student_id).trim() : null
+    const name      = (raw.name || '').trim()
+    if (!name) {
+      errors.push({ row: raw, message: '姓名為空，已略過' })
+      continue
+    }
+
+    const payload = {
+      event_id:   eventId,
+      student_id: studentId,
+      name,
+      donor_item: emptyToNull(raw.donor_item),
+      seat:       emptyToNull(raw.seat),
+      corsage:    emptyToNull(raw.corsage),
+      offering:   emptyToNull(raw.offering),
+      donor_note: emptyToNull(raw.donor_note),
+    }
+
+    // 找既有：學員型優先用 student_id，訪客型用 name
+    const found = studentId ? byStudent.get(studentId) : byName.get(name)
+
+    if (found) {
+      const { error } = await supabase
+        .from('event_donors')
+        .update({
+          name:       payload.name,
+          student_id: payload.student_id,
+          donor_item: payload.donor_item,
+          seat:       payload.seat,
+          corsage:    payload.corsage,
+          offering:   payload.offering,
+          donor_note: payload.donor_note,
+        })
+        .eq('donor_id', found.donor_id)
+      if (error) errors.push({ row: raw, message: error.message })
+      else updated++
+    } else {
+      const { error } = await supabase.from('event_donors').insert(payload)
+      if (error) errors.push({ row: raw, message: error.message })
+      else inserted++
+    }
+  }
+
+  return { success: errors.length === 0, inserted, updated, errors }
+}
+
+/**
+ * 報到時查功德主資訊
+ *   - 有 studentId 先用 (event_id, student_id) 查（學員型）
+ *   - 沒有或查不到，再用 (event_id, name) 查（訪客型）
+ *   回傳 donor or null
+ */
+export async function getDonorForRegistration(eventId, studentId, guestName) {
+  if (!eventId) return { donor: null, error: null }
+
+  // 學員型
+  if (studentId) {
+    const { data, error } = await supabase
+      .from('event_donors')
+      .select(DONOR_COLS)
+      .eq('event_id', eventId)
+      .eq('student_id', studentId)
+      .maybeSingle()
+    if (error) return { donor: null, error: error.message }
+    if (data)  return { donor: data, error: null }
+  }
+
+  // 訪客型（用姓名比對）
+  const name = (guestName || '').trim()
+  if (name) {
+    const { data, error } = await supabase
+      .from('event_donors')
+      .select(DONOR_COLS)
+      .eq('event_id', eventId)
+      .is('student_id', null)
+      .eq('name', name)
+      .maybeSingle()
+    if (error) return { donor: null, error: error.message }
+    if (data)  return { donor: data, error: null }
+  }
+
+  return { donor: null, error: null }
+}
+
+// trim 後空字串 → null（DB 端統一 null 表示「沒填」，報到時整列不顯示）
+function emptyToNull(v) {
+  if (v === undefined || v === null) return null
+  const s = String(v).trim()
+  return s === '' ? null : s
+}

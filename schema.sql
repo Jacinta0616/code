@@ -197,6 +197,65 @@ GRANT ALL ON registrations   TO authenticated;
 GRANT ALL ON audit_log       TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE student_classes_id_seq TO authenticated;
 
+
+-- ============================================================
+-- Phase 3 — 功德主管理（event_donors）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS event_donors (
+  donor_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id    UUID NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  student_id  TEXT,                                                   -- NULL = 訪客功德主
+  name        TEXT NOT NULL,
+  donor_item  TEXT,                                                   -- 功德項目（自由文字）
+  seat        TEXT,                                                   -- 座位
+  corsage     TEXT,                                                   -- 胸花
+  offering    TEXT,                                                   -- 供具
+  donor_note  TEXT,                                                   -- 備註
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_event_donors_student
+  ON event_donors(event_id, student_id) WHERE student_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_event_donors_guest
+  ON event_donors(event_id, name)       WHERE student_id IS NULL;
+CREATE INDEX        IF NOT EXISTS idx_event_donors_event
+  ON event_donors(event_id);
+CREATE INDEX        IF NOT EXISTS idx_event_donors_student
+  ON event_donors(student_id) WHERE student_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION touch_event_donors_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_event_donors_touch ON event_donors;
+CREATE TRIGGER trg_event_donors_touch
+  BEFORE UPDATE ON event_donors
+  FOR EACH ROW
+  EXECUTE FUNCTION touch_event_donors_updated_at();
+
+ALTER TABLE event_donors ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "anon can select event_donors"
+  ON event_donors FOR SELECT TO anon USING (true);
+CREATE POLICY "anon can insert event_donors"
+  ON event_donors FOR INSERT TO anon WITH CHECK (true);
+CREATE POLICY "anon can update event_donors"
+  ON event_donors FOR UPDATE TO anon USING (true);
+CREATE POLICY "anon can delete event_donors"
+  ON event_donors FOR DELETE TO anon USING (true);
+CREATE POLICY "authenticated full access on event_donors"
+  ON event_donors FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON event_donors TO anon;
+GRANT ALL ON event_donors TO authenticated;
+
+
 -- ============================================================
 -- 完成！執行後可用以下查詢確認資料表已建立：
 -- SELECT table_name FROM information_schema.tables

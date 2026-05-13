@@ -1,16 +1,45 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import AdminLayout from '../../components/AdminLayout'
-import { getAllEvents, getRegistrationForCheckin, getGuestRegistrationForCheckin, checkIn, uncheckIn, getCheckinStats, getRegistrationsWithStudents } from '../../lib/supabase'
+import { getAllEvents, getRegistrationForCheckin, getGuestRegistrationForCheckin, checkIn, uncheckIn, getCheckinStats, getRegistrationsWithStudents, getDonorForRegistration } from '../../lib/supabase'
 import CameraScanner from '../../components/CameraScanner'
 
 const IDLE_SECONDS = 5 // 成功/失敗畫面停留秒數
+
+// 功德主紫色卡片：空白欄位不顯示
+function DonorCard({ donor }) {
+  if (!donor) return null
+  const fields = [
+    { label: '功德項目', value: donor.donor_item },
+    { label: '座位',     value: donor.seat },
+    { label: '胸花',     value: donor.corsage },
+    { label: '供具',     value: donor.offering },
+    { label: '備註',     value: donor.donor_note },
+  ].filter(f => f.value && String(f.value).trim())
+  if (fields.length === 0) return null
+  return (
+    <div className="mt-6 mx-auto max-w-md bg-purple-50 border-2 border-purple-300 rounded-2xl p-5 text-left shadow-sm">
+      <p className="text-base font-bold text-purple-800 mb-3 flex items-center gap-2">
+        🪷 法會功德主
+      </p>
+      <dl className="space-y-2 text-base">
+        {fields.map(f => (
+          <div key={f.label} className="grid grid-cols-[5.5rem,1fr] gap-2">
+            <dt className="text-purple-600/80 font-medium">{f.label}</dt>
+            <dd className="text-gray-800 font-semibold break-words">{f.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
 
 export default function CheckinPage() {
   const { id } = useParams()
   const [eventName, setEventName] = useState('')
   const [status, setStatus] = useState('idle') // idle | loading | success | already | not_found | error
   const [result, setResult] = useState(null) // { name, checkedInAt, registrationId }
+  const [donor, setDonor]   = useState(null) // 功德主紀錄（紫色卡片）
   const [countdown, setCountdown] = useState(IDLE_SECONDS)
   const [todayCount, setTodayCount] = useState(0)
 
@@ -91,6 +120,7 @@ export default function CheckinPage() {
     clearInterval(countdownRef.current)
     setStatus('idle')
     setResult(null)
+    setDonor(null)
     setCountdown(IDLE_SECONDS)
   }, [])
 
@@ -141,6 +171,14 @@ export default function CheckinPage() {
     const name = isGuest
       ? (registration.answers?.guest_name ?? '訪客')
       : (registration.students?.name ?? scanned)
+
+    // 查功德主紀錄（學員型用 student_id、訪客型用 name；查不到回 null）
+    const { donor: donorRec } = await getDonorForRegistration(
+      id,
+      isGuest ? null : registration.student_id,
+      isGuest ? name : null,
+    )
+    setDonor(donorRec || null)
 
     if (registration.checked_in_at) {
       setStatus('already')
@@ -303,6 +341,7 @@ export default function CheckinPage() {
             <div className="text-8xl mb-6">✅</div>
             <p className="text-4xl font-bold text-green-700 mb-2">{result.name}</p>
             <p className="text-xl text-green-600">報到成功！</p>
+            <DonorCard donor={donor} />
             <p className="text-sm text-gray-400 mt-4">{countdown} 秒後自動重置</p>
             <button
               onClick={resetToIdle}
@@ -318,6 +357,7 @@ export default function CheckinPage() {
             <div className="text-8xl mb-6">⚠️</div>
             <p className="text-4xl font-bold text-amber-700 mb-2">{result.name}</p>
             <p className="text-xl text-amber-600">已於 {new Date(result.checkedInAt).toLocaleTimeString('zh-TW', { hour12: false })} 報到過</p>
+            <DonorCard donor={donor} />
             <div className="flex gap-3 justify-center mt-5">
               <button
                 onClick={handleUncheck}

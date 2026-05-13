@@ -1078,14 +1078,24 @@ export default function EventDetailPage() {
       </div>
 
       {/* 標題列 */}
-      <div className="flex items-center justify-between mb-5">
-        <h2 className="text-xl font-bold text-gray-800">{event.name}</h2>
-        <Link
-          to={`/admin/events/${id}/checkin`}
-          className="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-        >
-          📋 現場報到
-        </Link>
+      <div className="flex items-center justify-between mb-5 gap-3">
+        <h2 className="text-xl font-bold text-gray-800 min-w-0 truncate">{event.name}</h2>
+        <div className="flex items-center gap-2 shrink-0">
+          {event?.event_type === 'temple' && event?.is_dharma && isAdmin && (
+            <Link
+              to={`/admin/events/${id}/donors`}
+              className="bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+            >
+              🪷 功德主管理
+            </Link>
+          )}
+          <Link
+            to={`/admin/events/${id}/checkin`}
+            className="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+          >
+            📋 現場報到
+          </Link>
+        </div>
       </div>
 
       {/* Tab 切換 */}

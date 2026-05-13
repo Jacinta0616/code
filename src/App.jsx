@@ -13,6 +13,7 @@ import RelationshipsPage from './pages/admin/RelationshipsPage'
 import CarrangementPage from './pages/admin/CarrangementPage'
 import CarrangementDetailPage from './pages/admin/CarrangementDetailPage'
 import MonksPage from './pages/admin/MonksPage'
+import DonorManagePage from './pages/admin/DonorManagePage'
 import CarCheckinPage from './pages/CarCheckinPage'
 import LeaderScanPage from './pages/LeaderScanPage'
 
@@ -37,6 +38,9 @@ export default function App() {
           } />
           <Route path="/admin/events/:id/checkin" element={
             <ProtectedRoute><CheckinPage /></ProtectedRoute>
+          } />
+          <Route path="/admin/events/:id/donors" element={
+            <ProtectedRoute adminOnly><DonorManagePage /></ProtectedRoute>
           } />
           <Route path="/admin/students" element={
             <ProtectedRoute adminOnly><StudentsPage /></ProtectedRoute>

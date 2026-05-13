@@ -187,6 +187,19 @@ export async function updateRegistration(registrationId, answers, isDriver = und
   return { success: true, error: null }
 }
 
+/**
+ * 只更新 is_driver 欄位（不動 answers）
+ * 用途：小車配對時，師父手動指定同車號群組裡誰是主司機
+ */
+export async function setRegistrationIsDriver(registrationId, isDriver) {
+  const { error } = await supabase
+    .from('registrations')
+    .update({ is_driver: !!isDriver })
+    .eq('registration_id', registrationId)
+  if (error) return { success: false, error: error.message }
+  return { success: true, error: null }
+}
+
 // ─── 活動管理（後台）────────────────────────────────────────
 
 /**

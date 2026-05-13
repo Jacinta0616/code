@@ -13,6 +13,7 @@ import {
   getSmallCarLeaders,
   setSmallCarLeaders as saveSmallCarLeaders,
   getMonks,
+  setRegistrationIsDriver,
 } from '../../lib/supabase'
 import {
   getPreceptLevel,
@@ -71,6 +72,12 @@ const isSmallDriver    = (ans, dir) => (ans?.[fieldKeysFor(dir).transport] ?? ''
 const isSmallPassenger = (ans, dir) => (ans?.[fieldKeysFor(dir).transport] ?? '').includes('搭學員')
 const isSmallCar       = (ans, dir) => isSmallDriver(ans, dir) || isSmallPassenger(ans, dir)
 
+// 車號標準化：大寫 + 移除空白與連字號（與 EventDetailPage.computeTempleStats 一致）
+// 避免 "ABC-1234" 和 "abc 1234" 被當成兩台
+function normalizePlate(s) {
+  return String(s || '').trim().toUpperCase().replace(/[\s\-－—]/g, '')
+}
+
 // isLargeCar 接受完整 reg 物件；訪客與學員邏輯一致
 // - 有選「自行開車」或「搭學員」→ 小車（不管是否訪客）
 // - 有選「精舍」→ 大車
@@ -88,26 +95,66 @@ const isLargeCar = (r, dir) => {
 // ─── 小車配對（純運算，不存 DB）────────────────────────────────
 // 回傳 { matchedGroups, orphans }
 // matchedGroups：有司機的群組（按順序編為小車 1、2…）
+//   - 同車號的多位「自行開車」會合併為同一個 group（同一台車）
+//   - 主司機判定：恰好一位 is_driver=true → 那位；否則 needsDriverChoice=true（讓師父手動選）
 // orphans：找不到司機的乘客（需手動指定搭哪台小車）
 
 function computeSmallGroups(regs, dir) {
   const keys = fieldKeysFor(dir)
   const drivers    = regs.filter(r => isSmallDriver(r.answers, dir))
   const passengers = regs.filter(r => isSmallPassenger(r.answers, dir))
-  const usedIds    = new Set()
+
+  // Step 1: 依標準化車號分組（空車號 → 各自獨立 key）
+  const plateGroups = new Map()
+  for (const driver of drivers) {
+    const norm = normalizePlate(driver.answers?.[keys.plate] ?? '')
+    const groupKey = norm ? `PLATE:${norm}` : `EMPTY:${driver.registration_id}`
+    if (!plateGroups.has(groupKey)) plateGroups.set(groupKey, [])
+    plateGroups.get(groupKey).push(driver)
+  }
+
+  const usedIds       = new Set()
   const matchedGroups = []
 
-  for (const driver of drivers) {
-    const driverName = getName(driver)
-    const plate      = driver.answers?.[keys.plate] ?? ''
-    const matched    = passengers.filter(p => {
+  for (const [plateKey, candidates] of plateGroups) {
+    // 決定 anchor（主司機）
+    let anchor = candidates[0]
+    let needsDriverChoice = false
+    if (candidates.length > 1) {
+      const confirmed = candidates.filter(c => c.is_driver === true)
+      if (confirmed.length === 1) {
+        anchor = confirmed[0]
+      } else {
+        // 0 位（皆未確認）或 ≥2 位（衝突）→ 都視為「未指定」
+        needsDriverChoice = true
+        anchor = candidates[0]
+      }
+    }
+
+    // 比對共乘者：對 group 內任一 candidate 的名字命中即算
+    const candidateNames = candidates.map(c => getName(c)).filter(n => n && n.length >= 2)
+    const matched = passengers.filter(p => {
       if (usedIds.has(p.registration_id)) return false
       const cn = (p.answers?.[keys.carpool] ?? '').trim()
       if (!cn) return false
-      return driverName.includes(cn) || cn.includes(driverName)
+      return candidateNames.some(name => name.includes(cn) || cn.includes(name))
     })
     matched.forEach(p => usedIds.add(p.registration_id))
-    matchedGroups.push({ key: driver.registration_id, driverName, plate, members: [driver, ...matched] })
+
+    // members：anchor 第一 → 其他 candidate（共乘者性質）→ 比對到的共乘者
+    const otherCandidates = candidates.filter(c => c.registration_id !== anchor.registration_id)
+    const members = [anchor, ...otherCandidates, ...matched]
+
+    matchedGroups.push({
+      key: anchor.registration_id,
+      driverName: getName(anchor),
+      plate: anchor.answers?.[keys.plate] ?? '',
+      members,
+      candidates,                                                // 同車號司機（≥1 位）
+      candidateIds: new Set(candidates.map(c => c.registration_id)),
+      needsDriverChoice,
+      normalizedPlate: plateKey.startsWith('EMPTY:') ? '' : plateKey.slice(6),
+    })
   }
 
   // 找不到司機的乘客（整批回傳，讓使用者手動指定）
@@ -602,6 +649,8 @@ export default function CarrangementDetailPage() {
   const [saving,  setSaving]    = useState(false)
   const [msg,     setMsg]       = useState('')
   const [copyMsg, setCopyMsg]   = useState('')
+  // 小車「指定主司機」按下後，紀錄正在處理的 group key（避免重複按／顯示 disabled）
+  const [driverPickerBusy, setDriverPickerBusy] = useState(null)
 
   // ── 取目前方向的 state（方便讀取）──
   const cars                = carsByDir[direction]
@@ -730,6 +779,32 @@ export default function CarrangementDetailPage() {
     }
     setSmallCarLeaders(smallCarLeaderList ?? [])
     setLoading(false)
+  }
+
+  // ── 同車號小車：師父手動指定主司機 ──
+  // 對 group.candidates 全部更新 is_driver（被選位 true、其他 false），重抓 regs
+  // 不呼叫整個 load()，避免洗掉尚未儲存的大車排車修改
+  async function handleSelectMainDriver(group, newDriverRegId) {
+    if (!group?.candidates || group.candidates.length === 0) return
+    setDriverPickerBusy(group.key)
+    try {
+      const results = await Promise.all(
+        group.candidates.map(c =>
+          setRegistrationIsDriver(c.registration_id, c.registration_id === newDriverRegId)
+        )
+      )
+      const firstErr = results.find(r => !r.success)
+      if (firstErr) {
+        alert('指定主司機失敗：' + firstErr.error)
+        return
+      }
+      const { registrations } = await getEventRegistrationsDetail(eventId)
+      setRegs(registrations)
+    } catch (e) {
+      alert('指定主司機失敗：' + (e?.message ?? String(e)))
+    } finally {
+      setDriverPickerBusy(null)
+    }
   }
 
   // 還原單一方向的排車結果（從 DB savedCars + registrations）
@@ -1506,14 +1581,40 @@ export default function CarrangementDetailPage() {
                     <span className="text-green-700 bg-green-100 rounded-full px-2 py-0.5 text-xs">
                       小車 {idx + 1}
                     </span>
-                    <span>司機：{g.driverName}</span>
-                    {g.plate && <span className="text-gray-400 text-xs font-normal">{g.plate}</span>}
+                    {g.needsDriverChoice ? (
+                      <>
+                        <span className="text-red-700 bg-red-100 rounded-full px-2 py-0.5 text-xs">⚠️ 司機未指定</span>
+                        {g.plate && <span className="text-gray-400 text-xs font-normal">{g.plate}</span>}
+                        <select
+                          value=""
+                          onChange={e => {
+                            const rid = e.target.value
+                            if (rid) handleSelectMainDriver(g, rid)
+                          }}
+                          disabled={driverPickerBusy === g.key}
+                          className="text-xs border rounded px-1.5 py-0.5 bg-white focus:outline-none focus:ring-1 focus:ring-red-400"
+                        >
+                          <option value="">請選擇主司機 ▾</option>
+                          {g.candidates.map(c => (
+                            <option key={c.registration_id} value={c.registration_id}>
+                              {getName(c)}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    ) : (
+                      <>
+                        <span>司機：{g.driverName}</span>
+                        {g.plate && <span className="text-gray-400 text-xs font-normal">{g.plate}</span>}
+                      </>
+                    )}
                     <span className="text-xs text-gray-400 font-normal ml-auto">{g.allMembers.length} 人</span>
                   </div>
                   <div className="divide-y">
                     {g.allMembers.map((r, mi) => {
                       const cls       = (r.students?.student_classes ?? []).map(c => c.class_name).join('/')
-                      const isDriver  = r.registration_id === g.key
+                      const isAnchor      = r.registration_id === g.key
+                      const isOtherDriver = !isAnchor && g.candidateIds?.has(r.registration_id)
                       const carpoolNm = r.answers?.[fieldKeysFor(direction).carpool] ?? ''
                       const isOrphan  = orphans.some(o => o.registration_id === r.registration_id)
                       return (
@@ -1524,7 +1625,13 @@ export default function CarrangementDetailPage() {
                           <span className="flex-1 font-medium">{getName(r)}</span>
                           {cls && <span className="text-xs text-gray-400">{cls}</span>}
                           <span className="text-xs text-gray-300">
-                            {isDriver ? '（司機）' : carpoolNm ? `→ ${carpoolNm}` : ''}
+                            {isAnchor && !g.needsDriverChoice
+                              ? '（司機）'
+                              : isOtherDriver
+                                ? '（共乘・同車號）'
+                                : carpoolNm
+                                  ? `→ ${carpoolNm}`
+                                  : ''}
                           </span>
                           {/* 孤兒乘客可改指定到其他小車 */}
                           {isOrphan && (

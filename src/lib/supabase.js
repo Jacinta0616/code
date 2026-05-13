@@ -395,7 +395,7 @@ export async function getRegistrationsWithStudents(eventId) {
 export async function getRegistrationForCheckin(eventId, studentId) {
   const { data, error } = await supabase
     .from('registrations')
-    .select('registration_id, answers, checked_in_at, students!student_id(name)')
+    .select('registration_id, student_id, answers, checked_in_at, students!student_id(name)')
     .eq('event_id', eventId)
     .eq('student_id', studentId)
     .single()

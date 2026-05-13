@@ -294,6 +294,134 @@ function autoArrange(largePeople, carCount, seats, relGroups, options = {}) {
     }
   }
 
+  // ── Step 1.5: 學員備註同車（ad-hoc 同車要求） ────────────────
+  // 設計：學員 A 在備註欄寫「和 B 同車」，且 B 也是大車學員 → 視為同車單位
+  // - Union-Find 處理鏈式關係（A→B、B→C 自動合成 [A,B,C]）
+  // - 已被 Step 0（皈戒車）／Step 1（rel group）固定的人，整組往該車併
+  // - 找不到任何被提及的學員，但備註含「同車」字眼 → 警示讓師父人工處理
+  // - 完全沒同車意圖的備註（如過敏、不便等）→ 不警示，避免誤報
+  {
+    const COTRAVEL_HINTS = ['同車', '一車', '一起坐', '一起上山', '一起下山', '一起搭', '一起回', '坐同']
+
+    // Union-Find（簡易版）
+    const parent = {}
+    studentLarge.forEach(r => { parent[r.registration_id] = r.registration_id })
+    const find = x => parent[x] === x ? x : (parent[x] = find(parent[x]))
+    const union = (a, b) => {
+      const ra = find(a), rb = find(b)
+      if (ra !== rb) parent[ra] = rb
+    }
+
+    // 掃描每位學員的備註欄
+    for (const r of studentLarge) {
+      const note = getGuestNote(r)
+      if (!note.trim()) continue
+
+      const myName = getName(r)
+      const mentioned = []
+      for (const other of studentLarge) {
+        if (other.registration_id === r.registration_id) continue
+        const nm = getName(other)
+        if (nm && nm.length >= 2 && note.includes(nm)) {
+          mentioned.push(other)
+        }
+      }
+
+      if (mentioned.length > 0) {
+        for (const m of mentioned) union(r.registration_id, m.registration_id)
+      } else if (COTRAVEL_HINTS.some(h => note.includes(h))) {
+        // 有同車意圖但找不到對應學員
+        warnings.push({
+          kind: 'note_unmatched',
+          regIds: [r.registration_id],
+          size: 1,
+          message: `${myName} 備註「${note.slice(0, 15)}${note.length > 15 ? '…' : ''}」提到同車但找不到對應學員（可能對方未報名／姓名拼錯）`,
+        })
+      }
+    }
+
+    // 收集 size ≥ 2 的群組
+    const noteGroupMap = {}
+    for (const r of studentLarge) {
+      const root = find(r.registration_id)
+      if (!noteGroupMap[root]) noteGroupMap[root] = []
+      noteGroupMap[root].push(r.registration_id)
+    }
+    const noteGroups = Object.values(noteGroupMap).filter(g => g.length >= 2)
+
+    // 依群組人數遞減（大群組先處理，避免被小群組擠掉）
+    noteGroups.sort((a, b) => b.length - a.length)
+
+    for (const group of noteGroups) {
+      // (1) 任一人已被 Step 0 放進皈戒車 → 整組塞同台皈戒車
+      const preceptCar = cars.find(c => c.isPreceptCar && group.some(rid => c.members.includes(rid)))
+      if (preceptCar) {
+        const remaining = group.filter(rid => !placed.has(rid))
+        const seatLeft  = preceptCar.seats - preceptCar.members.length
+        const fits      = remaining.slice(0, seatLeft)
+        const overflow  = remaining.slice(seatLeft)
+        // 皈戒車的 avail() 回 0，這裡刻意繞過 avail() 直接 push（同 Step 0 做法）
+        for (const rid of fits) { preceptCar.members.push(rid); placed.add(rid) }
+        if (overflow.length > 0) {
+          warnings.push({
+            kind: 'note_precept_overflow',
+            regIds: overflow,
+            size: overflow.length,
+            message: `備註同車群組共 ${group.length} 人需與皈戒車「${preceptCar.car_name}」同行，但車位不足 ${overflow.length} 位`,
+          })
+        }
+        continue
+      }
+
+      // (2) 任一人已被 Step 1 (rel group) 放好 → 整組塞那台車
+      const pinnedCar = cars.find(c => !c.isPreceptCar && group.some(rid => c.members.includes(rid)))
+      if (pinnedCar) {
+        const remaining = group.filter(rid => !placed.has(rid))
+        if (remaining.length === 0) {
+          // 全員都已被放（rel group 拆到不同車）→ 檢查是否真同車
+          const carIds = new Set()
+          for (const rid of group) {
+            const c = cars.find(x => x.members.includes(rid))
+            if (c) carIds.add(c.tempId)
+          }
+          if (carIds.size > 1) {
+            const groupNames = group.map(rid => getName(regLookup[rid])).filter(Boolean).join('、')
+            warnings.push({
+              kind: 'note_group_split',
+              regIds: group,
+              size: group.length,
+              message: `備註同車群組「${groupNames}」共 ${group.length} 人因既有 rel group 設定被拆到 ${carIds.size} 台車，請手動調整`,
+            })
+          }
+        } else if (avail(pinnedCar) >= remaining.length) {
+          placeRegIds(pinnedCar, remaining)
+        } else {
+          warnings.push({
+            kind: 'note_pinned_overflow',
+            regIds: remaining,
+            size: remaining.length,
+            message: `備註同車群組共 ${group.length} 人被既有分派鎖在「${pinnedCar.car_name}」，剩餘 ${remaining.length} 位但僅 ${avail(pinnedCar)} 位空位`,
+          })
+        }
+        continue
+      }
+
+      // (3) 都未放 → tightest fit
+      const fits = cars.filter(c => avail(c) >= group.length)
+      if (fits.length > 0) {
+        const target = fits.reduce((a, b) => avail(a) <= avail(b) ? a : b)
+        placeRegIds(target, group)
+      } else {
+        warnings.push({
+          kind: 'note_group_no_seat',
+          regIds: group,
+          size: group.length,
+          message: `備註同車群組共 ${group.length} 人，沒有車位可整組安置（最大空位 ${avail(maxAvailCar())} 位）`,
+        })
+      }
+    }
+  }
+
   // ── Step 2: 建 host+guest bundle ─────────────────────────
   // 對每位學員找其訪客（host_student_id 優先 → 備註比對 fallback）
   const bundles = []  // { hostRegId, regIds[host+guests], size, className, groupName, pinnedCar }

@@ -4,6 +4,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import AdminLayout from '../../components/AdminLayout'
 import DynamicForm from '../../components/DynamicForm'
 import FieldRow from '../../components/FieldRow'
+import SearchableSelect from '../../components/SearchableSelect'
 import { useAuth } from '../../lib/auth'
 import {
   getAllEvents,
@@ -15,6 +16,7 @@ import {
   getRegistrationsWithStudents,
   deleteRegistration,
   createGuestRegistration,
+  submitRegistration,
   updateRegistration,
   uncheckIn,
   logRegistrationChange,
@@ -24,6 +26,8 @@ import {
   getEventVolunteers,
   setEventVolunteers,
   getTemplates,
+  getAllStudents,
+  checkDuplicate,
 } from '../../lib/supabase'
 
 const STATUS_LABEL = { draft: '草稿', active: '進行中', closed: '已關閉' }
@@ -334,6 +338,15 @@ export default function EventDetailPage() {
   const [guestSaving, setGuestSaving] = useState(false)
   const [guestRegId, setGuestRegId] = useState(null)
 
+  // 學員手動報名 modal（後台補登用）
+  const [studentModal, setStudentModal]               = useState(false)
+  const [studentSelectedId, setStudentSelectedId]     = useState('')
+  const [studentAnswers, setStudentAnswers]           = useState({})
+  const [studentSaving, setStudentSaving]             = useState(false)
+  const [studentDuplicate, setStudentDuplicate]       = useState(false)   // 是否已有報名
+  const [allStudents, setAllStudents]                 = useState([])
+  const [studentsLoading, setStudentsLoading]         = useState(false)
+
   // 編輯報名 modal
   const [editModal, setEditModal] = useState(null) // null | { registration, isGuest }
   const [editAnswers, setEditAnswers] = useState({})
@@ -593,6 +606,81 @@ export default function EventDetailPage() {
       newAnswers: { guest_name: guestName.trim(), ...guestAnswers },
     })
 
+    await load()
+  }
+
+  // ── 學員手動報名（後台補登）─────────────────────────────────
+  async function openStudentModal() {
+    setStudentSelectedId('')
+    setStudentAnswers({})
+    setStudentDuplicate(false)
+    setStudentModal(true)
+    // 第一次開啟時 lazy load 學員清單
+    if (allStudents.length === 0 && !studentsLoading) {
+      setStudentsLoading(true)
+      const { students } = await getAllStudents()
+      // 只保留在籍學員，依編號排序
+      setAllStudents((students || []).filter(s => s.active !== false))
+      setStudentsLoading(false)
+    }
+  }
+
+  function closeStudentModal() {
+    setStudentModal(false)
+    setStudentSelectedId('')
+    setStudentAnswers({})
+    setStudentDuplicate(false)
+  }
+
+  // 選到的學員資訊（顯示確認卡用）
+  const selectedStudent = studentSelectedId
+    ? allStudents.find(s => s.student_id === studentSelectedId)
+    : null
+
+  // 切換學員時檢查重複報名
+  async function handleStudentPick(sid) {
+    setStudentSelectedId(sid)
+    setStudentDuplicate(false)
+    if (!sid) return
+    const dup = await checkDuplicate(id, sid)
+    setStudentDuplicate(dup)
+  }
+
+  async function handleStudentSubmit(e) {
+    e.preventDefault()
+    if (!studentSelectedId) { alert('請先選擇學員'); return }
+    if (studentDuplicate) { alert('此學員已報名此活動，請改用「編輯」'); return }
+
+    setStudentSaving(true)
+    // is_driver 判定：若答案中有任何 plate 欄位填了車號 → true
+    const plateFields = fields.filter(f => f.field_type === 'plate')
+    const isDriver    = plateFields.some(f => {
+      const v = studentAnswers?.[f.field_key]
+      return v && String(v).trim() !== ''
+    })
+
+    const { success, error } = await submitRegistration(
+      id,
+      studentSelectedId,
+      studentAnswers,
+      'admin-manual',
+      isDriver,
+    )
+    setStudentSaving(false)
+    if (!success) { alert(`新增失敗：${error}`); return }
+
+    // 記錄手動新增（與訪客新增採同 changeType='created'）
+    await logRegistrationChange({
+      registrationId: null, // 不需精準 reg_id，後台異動表用 student_id 也可追溯
+      eventId: id,
+      eventName: event.name,
+      studentName: selectedStudent?.name ?? '',
+      changeType: 'created',
+      oldAnswers: null,
+      newAnswers: studentAnswers,
+    })
+
+    closeStudentModal()
     await load()
   }
 
@@ -1066,6 +1154,78 @@ export default function EventDetailPage() {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 學員手動報名 Modal（後台補登）── */}
+      {studentModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6">
+            <form onSubmit={handleStudentSubmit}>
+              <h3 className="text-lg font-bold text-gray-800 mb-1">新增學員報名</h3>
+              <p className="text-xs text-gray-500 mb-4">從學員清單選人後補填表單（不必刷學員證）</p>
+
+              {/* 選擇學員 */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-600 mb-1">
+                  學員 <span className="text-red-500">*</span>
+                </label>
+                {studentsLoading ? (
+                  <p className="text-sm text-gray-400 px-3 py-2">載入學員清單中…</p>
+                ) : (
+                  <SearchableSelect
+                    value={studentSelectedId}
+                    onChange={handleStudentPick}
+                    options={allStudents.map(s => {
+                      const cls = s.student_classes?.[0]
+                      const classText = cls
+                        ? `${cls.class_name ?? ''}${cls.group_name ? `・${cls.group_name}` : ''}`
+                        : ''
+                      return {
+                        value: s.student_id,
+                        label: `${s.name}（${s.student_id}）`,
+                        sublabel: classText,
+                        searchText: `${s.name} ${s.student_id} ${classText}`.toLowerCase(),
+                      }
+                    })}
+                    placeholder="請選擇學員（可搜尋姓名／編號／班級）"
+                    searchPlaceholder="輸入姓名／編號／班級…"
+                  />
+                )}
+              </div>
+
+              {/* 重複報名警示 */}
+              {studentDuplicate && selectedStudent && (
+                <div className="mb-4 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                  ⚠️ <strong>{selectedStudent.name}</strong> 已報名此活動。請至報名名單點該筆「編輯」修改。
+                </div>
+              )}
+
+              {/* 動態欄位 */}
+              {studentSelectedId && !studentDuplicate && fields.length > 0 && (
+                <div className="mb-4 pt-3 border-t border-gray-100">
+                  <DynamicForm fields={fields} answers={studentAnswers} onChange={setStudentAnswers} />
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeStudentModal}
+                  className="flex-1 border border-gray-300 text-gray-600 hover:bg-gray-50 font-medium py-2.5 rounded-xl transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={studentSaving || !studentSelectedId || studentDuplicate}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {studentSaving ? '新增中…' : '確認報名'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1616,6 +1776,13 @@ export default function EventDetailPage() {
                     🖨️ 批次列印（{selectedGuestIds.size}）
                   </button>
                 )}
+                <button
+                  onClick={openStudentModal}
+                  className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                  title="從學員清單選人補登報名（不必刷學員證）"
+                >
+                  ＋ 新增學員報名
+                </button>
                 <button
                   onClick={openGuestModal}
                   className="bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"

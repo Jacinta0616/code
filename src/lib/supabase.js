@@ -854,24 +854,45 @@ export async function saveCarArrangement(eventId, largeCars, smallGroups = [], d
   for (let i = 0; i < largeCars.length; i++) {
     const carId = largeIds[i]
     if (!carId) continue
-    for (const rid of largeCars[i].members) memberRows.push({ car_id: carId, registration_id: rid })
-    for (const rid of largeCars[i].leaders) leaderRows.push({ car_id: carId, registration_id: rid })
+    for (const rid of largeCars[i].members) memberRows.push({ car_id: carId, registration_id: rid, _src: `large#${i}` })
+    for (const rid of largeCars[i].leaders) leaderRows.push({ car_id: carId, registration_id: rid, _src: `large#${i}` })
   }
 
   for (let i = 0; i < smallGroups.length; i++) {
     const carId = smallIds[i]
     if (!carId) continue
     for (const r of smallGroups[i].allMembers) {
-      memberRows.push({ car_id: carId, registration_id: r.registration_id })
+      memberRows.push({ car_id: carId, registration_id: r.registration_id, _src: `small#${i}` })
     }
   }
 
-  if (memberRows.length > 0) {
-    const { error: mErr } = await supabase.from('car_members').insert(memberRows)
+  // 同車內 reg_id 去重（unique constraint = (car_id, registration_id)）
+  // 重複可能來自：手動拖曳 race、合併小車後 orphan/guestMap 殘留舊 key 等
+  // 寫入前防呆 + console.warn 把重複資料吐出來方便 debug
+  const dedup = (rows, label) => {
+    const seen = new Set()
+    const out  = []
+    for (const m of rows) {
+      const k = `${m.car_id}::${m.registration_id}`
+      if (seen.has(k)) {
+        console.warn(`[saveCarArrangement] 略過重複 ${label}：`, { car_id: m.car_id, registration_id: m.registration_id, src: m._src })
+        continue
+      }
+      seen.add(k)
+      const { _src, ...clean } = m
+      out.push(clean)
+    }
+    return out
+  }
+  const memberRowsClean = dedup(memberRows, 'car_members')
+  const leaderRowsClean = dedup(leaderRows, 'car_leaders')
+
+  if (memberRowsClean.length > 0) {
+    const { error: mErr } = await supabase.from('car_members').insert(memberRowsClean)
     if (mErr) return { success: false, error: mErr.message }
   }
-  if (leaderRows.length > 0) {
-    const { error: lErr } = await supabase.from('car_leaders').insert(leaderRows)
+  if (leaderRowsClean.length > 0) {
+    const { error: lErr } = await supabase.from('car_leaders').insert(leaderRowsClean)
     if (lErr) return { success: false, error: lErr.message }
   }
 

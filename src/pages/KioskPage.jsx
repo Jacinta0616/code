@@ -15,9 +15,9 @@ import DynamicForm from '../components/DynamicForm'
 import CameraScanner from '../components/CameraScanner'
 import { isDriverFromAnswers } from '../lib/registrationHelpers'
 
-// ── QR Code 下載 / 分享 ──────────────────────────────────────
-// 把 <svg id> 轉成 PNG Blob（內部用）
-function svgToPngBlob(svgId, size = 600) {
+// ── QR 小卡（代報親友報到用）──────────────────────────────
+// 把 DOM 中的 <svg> 載成 <img> 物件（內部用，給 canvas drawImage）
+function loadSvgAsImage(svgId) {
   return new Promise((resolve, reject) => {
     const svg = document.getElementById(svgId)
     if (!svg) { reject(new Error('SVG not found')); return }
@@ -25,47 +25,124 @@ function svgToPngBlob(svgId, size = 600) {
     const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' })
     const url = URL.createObjectURL(svgBlob)
     const img = new Image()
-    img.onload = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = size
-      canvas.height = size
-      const ctx = canvas.getContext('2d')
-      ctx.fillStyle = '#fff'
-      ctx.fillRect(0, 0, size, size)
-      ctx.drawImage(img, 0, 0, size, size)
-      URL.revokeObjectURL(url)
-      canvas.toBlob(blob => {
-        if (!blob) reject(new Error('Canvas toBlob failed'))
-        else resolve(blob)
-      }, 'image/png')
-    }
-    img.onerror = reject
+    img.onload  = () => { URL.revokeObjectURL(url); resolve(img) }
+    img.onerror = err => { URL.revokeObjectURL(url); reject(err) }
     img.src = url
   })
 }
 
-// 下載 PNG
-async function downloadQRPng(svgId, filename) {
+// 格式化活動日期（同一天只顯示一個；跨日顯示「YYYY/MM/DD ～ YYYY/MM/DD」）
+function formatEventDateRange(dateStart, dateEnd) {
+  if (!dateStart) return ''
+  const fmt = d => String(d).replaceAll('-', '/')
+  if (!dateEnd || dateEnd === dateStart) return fmt(dateStart)
+  return `${fmt(dateStart)} ～ ${fmt(dateEnd)}`
+}
+
+// 產出「QR 小卡」PNG Blob（600x800）— 仿後台訪客小卡樣式
+// cardData: { svgId, name, eventName, eventDate, location? }
+async function generateQRCardBlob({ svgId, name, eventName, eventDate, location }) {
+  const W = 600
+  const H = 800
+  const canvas = document.createElement('canvas')
+  canvas.width  = W
+  canvas.height = H
+  const ctx = canvas.getContext('2d')
+
+  // 白底
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, W, H)
+  // 邊框
+  ctx.strokeStyle = '#e5e7eb'
+  ctx.lineWidth = 3
+  ctx.strokeRect(15, 15, W - 30, H - 30)
+
+  ctx.textAlign = 'center'
+  const fontFamily = '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif'
+
+  // 頂部「普宜精舍」
+  ctx.fillStyle = '#9ca3af'
+  ctx.font = `600 26px ${fontFamily}`
+  ctx.fillText('普 宜 精 舍', W / 2, 70)
+  // 副標
+  ctx.fillStyle = '#a78bfa'
+  ctx.font = `18px ${fontFamily}`
+  ctx.fillText('— 親友代報・報到 QR Code —', W / 2, 100)
+
+  // QR 圖
+  const qrSize = 380
+  const qrX = (W - qrSize) / 2
+  const qrY = 130
   try {
-    const blob = await svgToPngBlob(svgId)
+    const img = await loadSvgAsImage(svgId)
+    ctx.drawImage(img, qrX, qrY, qrSize, qrSize)
+  } catch (e) {
+    console.warn('[generateQRCardBlob] svg load failed:', e)
+    ctx.fillStyle = '#fee2e2'
+    ctx.fillRect(qrX, qrY, qrSize, qrSize)
+  }
+
+  // 姓名（紫色大字）
+  ctx.fillStyle = '#1f2937'
+  ctx.font = `bold 40px ${fontFamily}`
+  ctx.fillText(name || '訪客', W / 2, 580)
+
+  // 活動名稱
+  ctx.fillStyle = '#374151'
+  ctx.font = `24px ${fontFamily}`
+  ctx.fillText(eventName || '', W / 2, 625)
+
+  // 日期 + 地點
+  ctx.fillStyle = '#6b7280'
+  ctx.font = `20px ${fontFamily}`
+  let metaY = 660
+  if (eventDate) { ctx.fillText(eventDate, W / 2, metaY); metaY += 30 }
+  if (location)  { ctx.fillText(location, W / 2, metaY) }
+
+  // 底部提示
+  ctx.fillStyle = '#9ca3af'
+  ctx.font = `16px ${fontFamily}`
+  ctx.fillText('當天現場掃此碼即可報到', W / 2, 750)
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob)
+      else reject(new Error('canvas toBlob 失敗'))
+    }, 'image/png')
+  })
+}
+
+// 下載 QR 小卡
+async function downloadQRCard(cardData) {
+  try {
+    const blob = await generateQRCardBlob(cardData)
+    const filename = `${cardData.name || 'friend'}_${cardData.eventName || ''}_QR.png`
+      .replace(/[<>:"/\\|?*\s]/g, '_').slice(0, 80)
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
     link.download = filename
     link.click()
     setTimeout(() => URL.revokeObjectURL(link.href), 1000)
   } catch (e) {
-    console.warn('[downloadQRPng]', e)
+    console.warn('[downloadQRCard]', e)
     alert('下載失敗，請稍後再試')
   }
 }
 
-// 分享 PNG（Web Share API；不支援時 fallback 下載）
-async function shareQRPng(svgId, filename, title, text) {
+// 分享 QR 小卡（Web Share API；不支援時 fallback 下載）
+async function shareQRCard(cardData) {
   try {
-    const blob = await svgToPngBlob(svgId)
+    const blob = await generateQRCardBlob(cardData)
+    const filename = `${cardData.name || 'friend'}_${cardData.eventName || ''}_QR.png`
+      .replace(/[<>:"/\\|?*\s]/g, '_').slice(0, 80)
     const file = new File([blob], filename, { type: 'image/png' })
+    const shareText = `${cardData.eventName || ''}・${cardData.name || '親友'} 報到 QR Code`
     if (navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title, text })
+      await navigator.share({
+        files: [file],
+        title: `${cardData.name || '親友'} 報到 QR`,
+        text: shareText,
+      })
       return
     }
     // 不支援 → fallback 下載
@@ -76,7 +153,7 @@ async function shareQRPng(svgId, filename, title, text) {
     setTimeout(() => URL.revokeObjectURL(link.href), 1000)
   } catch (e) {
     if (e.name === 'AbortError') return  // 使用者取消分享
-    console.warn('[shareQRPng]', e)
+    console.warn('[shareQRCard]', e)
     alert('分享失敗，請改用下載')
   }
 }
@@ -110,9 +187,11 @@ export default function KioskPage() {
   const [friendMode, setFriendMode] = useState(null) // null | 'friend'（只代親友，不再有「本人+親友」綁定模式）
   const [friendName, setFriendName] = useState('')
   const [friendAnswers, setFriendAnswers] = useState({})
-  // 上次代報成功的 registration_id（給 success 畫面產 QR 用）
+  // 上次代報成功的 registration_id 與活動 metadata（給 success 畫面產 QR 小卡用）
   const [lastFriendRegId, setLastFriendRegId] = useState('')
   const [lastFriendEventName, setLastFriendEventName] = useState('')
+  const [lastFriendEventDate, setLastFriendEventDate] = useState('')
+  const [lastFriendEventLocation, setLastFriendEventLocation] = useState('')
   // 該學員代報過的所有親友清單（OverviewScreen 顯示用）
   const [friendRegistrations, setFriendRegistrations] = useState([])
 
@@ -285,6 +364,8 @@ export default function KioskPage() {
     setSuccessEventName(`${event.name}（${name} 親友）`)
     setLastFriendRegId(registrationId)
     setLastFriendEventName(event.name)
+    setLastFriendEventDate(formatEventDateRange(event.date_start, event.date_end))
+    setLastFriendEventLocation(event.location || '')
     setFriendAnswers({})
     // 即時更新「您代報的親友」清單（不必重新查 DB）
     setFriendRegistrations(prev => [
@@ -446,6 +527,8 @@ export default function KioskPage() {
     setFriendAnswers({})
     setLastFriendRegId('')
     setLastFriendEventName('')
+    setLastFriendEventDate('')
+    setLastFriendEventLocation('')
     setFriendRegistrations([])
     setPhase(eventItems.length ? 'idle' : 'no_event')
   }
@@ -557,6 +640,8 @@ export default function KioskPage() {
             eventName={successEventName}
             friendRegId={lastFriendRegId}
             friendEventName={lastFriendEventName}
+            friendEventDate={lastFriendEventDate}
+            friendEventLocation={lastFriendEventLocation}
             onContinue={handleContinueFriend}
             onDone={handleDoneFriend}
           />
@@ -645,8 +730,27 @@ function OverviewScreen({
     acc[fr.event_id].push(fr)
     return acc
   }, {})
-  const eventNameMap = Object.fromEntries(eventItems.map(({ event }) => [event.event_id, event.name]))
+  const eventNameMap   = Object.fromEntries(eventItems.map(({ event }) => [event.event_id, event.name]))
   const eventFieldsMap = Object.fromEntries(eventItems.map(({ event, fields }) => [event.event_id, fields]))
+  const eventInfoMap   = Object.fromEntries(eventItems.map(({ event }) => [event.event_id, {
+    name:     event.name,
+    dateStart: event.date_start,
+    dateEnd:   event.date_end,
+    location:  event.location,
+  }]))
+
+  // 開啟 QR Modal 的親友資料（null = 關閉）
+  const [viewingFriend, setViewingFriend] = useState(null)
+  const openFriendQR = (fr) => {
+    const ev = eventInfoMap[fr.event_id] || {}
+    setViewingFriend({
+      registration_id: fr.registration_id,
+      name:      fr.answers?.guest_name || '訪客',
+      eventName: ev.name || '',
+      eventDate: formatEventDateRange(ev.dateStart, ev.dateEnd),
+      location:  ev.location || '',
+    })
+  }
   return (
     <div className="w-full max-w-lg">
       {/* 報名狀態查詢失敗提示 */}
@@ -891,7 +995,15 @@ function OverviewScreen({
                             }, [])
                             return (
                               <div key={fr.registration_id} className="bg-purple-50 rounded-lg px-3 py-2">
-                                <p className="text-kiosk-sm font-bold text-purple-800">{guestName}</p>
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-kiosk-sm font-bold text-purple-800 truncate">{guestName}</p>
+                                  <button
+                                    onClick={() => openFriendQR(fr)}
+                                    className="shrink-0 inline-flex items-center gap-1 text-kiosk-sm bg-purple-600 text-white px-2.5 py-1 rounded-lg font-bold active:scale-95 transition-transform"
+                                  >
+                                    🎫 報到 QR
+                                  </button>
+                                </div>
                                 {items.length > 0 && (
                                   <details className="mt-1 group/inner">
                                     <summary className="cursor-pointer text-kiosk-sm text-purple-600 select-none list-none flex items-center gap-1">
@@ -930,6 +1042,9 @@ function OverviewScreen({
         完成，返回首頁
       </button>
       <p className="text-center text-kiosk-sm text-gray-400 mt-3">{OVERVIEW_IDLE_SECONDS} 秒無操作自動返回</p>
+
+      {/* 代報親友 QR 小卡 Modal */}
+      <FriendQRModal friend={viewingFriend} onClose={() => setViewingFriend(null)} />
     </div>
   )
 }
@@ -1115,16 +1230,24 @@ function FriendFormScreen({
   )
 }
 
-// ── 親友代報：送出成功，QR Code + 連續代報入口 ──────────────
-function FriendSuccessScreen({ studentName, friendName, eventName, friendRegId, friendEventName, onContinue, onDone }) {
+// ── 親友代報：送出成功，QR 小卡 + 連續代報入口 ──────────────
+function FriendSuccessScreen({
+  studentName, friendName, eventName, friendRegId,
+  friendEventName, friendEventDate, friendEventLocation,
+  onContinue, onDone,
+}) {
   const qrSvgId = 'friend-success-qr'
-  const qrFilename = `${friendName || 'friend'}_${friendEventName || ''}_QR.png`
-    .replace(/[<>:"/\\|?*\s]/g, '_')
-    .slice(0, 80)
+  const cardData = {
+    svgId: qrSvgId,
+    name: friendName,
+    eventName: friendEventName,
+    eventDate: friendEventDate,
+    location: friendEventLocation,
+  }
 
   return (
     <div className="w-full max-w-lg">
-      <div className="bg-green-50 border-2 border-green-400 rounded-2xl px-6 py-6 mb-4 text-center">
+      <div className="bg-green-50 border-2 border-green-400 rounded-2xl px-6 py-5 mb-4 text-center">
         <div className="text-5xl mb-2">✅</div>
         <p className="text-kiosk-xl font-bold text-green-800 mb-1">代報完成</p>
         <p className="text-kiosk-base text-gray-700">
@@ -1135,33 +1258,32 @@ function FriendSuccessScreen({ studentName, friendName, eventName, friendRegId, 
         )}
       </div>
 
-      {/* 訪客 QR Code（給親友報到用） */}
+      {/* 親友報到 QR 小卡（仿後台訪客小卡樣式） */}
       {friendRegId && (
         <div className="bg-white border-2 border-purple-200 rounded-2xl p-4 mb-4">
           <p className="text-kiosk-sm font-bold text-purple-700 mb-3 text-center">
-            🎫 {friendName} 的報到 QR Code
+            🎫 {friendName} 的報到 QR 小卡
           </p>
-          <div className="flex justify-center mb-3 bg-gray-50 rounded-xl p-3">
-            <QRCodeSVG
-              id={qrSvgId}
-              value={String(friendRegId)}
-              size={160}
-              level="M"
-              includeMargin
-            />
-          </div>
-          <p className="text-kiosk-sm text-gray-500 text-center mb-3 leading-snug">
-            請傳給 {friendName}，當天現場掃描即可報到。
+          <QRCardPreview
+            svgId={qrSvgId}
+            regId={friendRegId}
+            name={friendName}
+            eventName={friendEventName}
+            eventDate={friendEventDate}
+            location={friendEventLocation}
+          />
+          <p className="text-kiosk-sm text-gray-500 text-center mt-3 mb-3 leading-snug">
+            可下載成圖片或分享給 {friendName}，當天現場掃此碼即可報到。
           </p>
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={() => downloadQRPng(qrSvgId, qrFilename)}
+              onClick={() => downloadQRCard(cardData)}
               className="py-3 px-3 bg-white border-2 border-purple-300 text-purple-700 rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
             >
-              📥 下載
+              📥 下載小卡
             </button>
             <button
-              onClick={() => shareQRPng(qrSvgId, qrFilename, `${friendName} 報到 QR`, `${friendEventName || ''} - ${friendName} 的報到 QR Code`)}
+              onClick={() => shareQRCard(cardData)}
               className="py-3 px-3 bg-purple-600 text-white rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
             >
               📤 分享給親友
@@ -1189,6 +1311,87 @@ function FriendSuccessScreen({ studentName, friendName, eventName, friendRegId, 
         >
           ＋ 再代報一位
         </button>
+      </div>
+    </div>
+  )
+}
+
+// ── QR 小卡預覽（FriendSuccessScreen 與 FriendQRModal 共用）─
+function QRCardPreview({ svgId, regId, name, eventName, eventDate, location }) {
+  return (
+    <div className="bg-white border-2 border-gray-200 rounded-xl p-4 mx-auto" style={{ maxWidth: 320 }}>
+      <p className="text-center text-kiosk-sm text-gray-400 tracking-widest">普 宜 精 舍</p>
+      <p className="text-center text-kiosk-sm text-purple-500 mt-1 mb-3">— 親友代報・報到 QR —</p>
+      <div className="flex justify-center bg-gray-50 rounded-lg p-2 mb-3">
+        <QRCodeSVG id={svgId} value={String(regId)} size={180} level="M" includeMargin />
+      </div>
+      <p className="text-center text-kiosk-base font-bold text-gray-800">{name}</p>
+      {eventName && (
+        <p className="text-center text-kiosk-sm text-gray-600 mt-0.5">{eventName}</p>
+      )}
+      {eventDate && (
+        <p className="text-center text-kiosk-sm text-gray-500 mt-0.5">{eventDate}</p>
+      )}
+      {location && (
+        <p className="text-center text-kiosk-sm text-gray-500">{location}</p>
+      )}
+      <p className="text-center text-xs text-gray-400 mt-2">當天現場掃此碼即可報到</p>
+    </div>
+  )
+}
+
+// ── 代報親友 QR Modal（點清單裡某位親友的「查看 QR」開啟） ──
+function FriendQRModal({ friend, onClose }) {
+  if (!friend) return null
+  const qrSvgId = `friend-modal-qr-${friend.registration_id}`
+  const cardData = {
+    svgId: qrSvgId,
+    name: friend.name,
+    eventName: friend.eventName,
+    eventDate: friend.eventDate,
+    location: friend.location,
+  }
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-kiosk-base font-bold text-purple-700">🎫 報到 QR 小卡</p>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 text-2xl leading-none w-8 h-8"
+            aria-label="關閉"
+          >
+            ×
+          </button>
+        </div>
+        <QRCardPreview
+          svgId={qrSvgId}
+          regId={friend.registration_id}
+          name={friend.name}
+          eventName={friend.eventName}
+          eventDate={friend.eventDate}
+          location={friend.location}
+        />
+        <div className="grid grid-cols-2 gap-2 mt-4">
+          <button
+            onClick={() => downloadQRCard(cardData)}
+            className="py-3 px-3 bg-white border-2 border-purple-300 text-purple-700 rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
+          >
+            📥 下載小卡
+          </button>
+          <button
+            onClick={() => shareQRCard(cardData)}
+            className="py-3 px-3 bg-purple-600 text-white rounded-xl text-kiosk-sm font-bold active:scale-95 transition-transform"
+          >
+            📤 分享給親友
+          </button>
+        </div>
       </div>
     </div>
   )

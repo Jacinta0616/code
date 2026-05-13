@@ -15,10 +15,9 @@ import {
 
 // ── Excel 模板下載 ──────────────────────────────────────────
 function downloadTemplate() {
+  // 只有表頭，沒有範例資料（師父反映範例會誤導）
   const ws = XLSX.utils.aoa_to_sheet([
     ['學員編號', '姓名', '功德項目', '座位', '胸花', '供具', '備註'],
-    ['115005662', '王大明', '消災功德主', 'A12', '紅色一朵', '水果一份', '超薦先嚴 王老先生'],
-    ['',          '陳師姐', '隨喜功德主', '',     '',         '',         '訪客（無學員編號）'],
   ])
   ws['!cols'] = [
     { wch: 12 }, // 學員編號
@@ -672,7 +671,7 @@ function DonorFormModal({ eventId, editingDonor, studentOptions, onClose, onSave
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="block text-xs font-medium text-gray-600 mb-1">功德項目（例：消災功德主）</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">功德項目（例：如意功德主）</label>
               <input
                 value={form.donor_item}
                 onChange={e => setForm(f => ({ ...f, donor_item: e.target.value }))}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import * as XLSX from 'xlsx'
 import AdminLayout from '../../components/AdminLayout'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
@@ -1184,79 +1185,274 @@ export default function CarrangementDetailPage() {
   }
 
   function handleExport() {
-    const rows = [['方向', '車次', '姓名', '班級', '組別', '身份別', '備註']]
+    // 共用工具：班級／組別字串
+    const clsOf = r => getClasses(r).map(c => c.class_name).join('/')
+    const grpOf = r => getClasses(r).map(c => c.group_name).filter(Boolean).join('/')
+    const idOf  = r => r.answers?.identity ?? (r.student_id ? '' : '訪客')
 
-    // 兩個方向各自匯出
-    for (const dir of ['down', 'up']) {
-      const dirCars      = carsByDir[dir]
-      const dirSmallRegs = regs.filter(r => isSmallCar(r.answers, dir))
-      const { matchedGroups: dirMatched, orphans: dirOrphans } =
-        computeSmallGroups(dirSmallRegs, dir)
-      const dirOrphanMap = orphanByDir[dir]
-      const dirGuestMap  = guestSmallByDir[dir]
-      const dirFinalSmall = dirMatched.map(g => ({
-        ...g,
-        allMembers: [
-          ...g.members,
-          ...dirOrphans.filter(o => dirOrphanMap[o.registration_id] === g.key),
-          ...regs.filter(r => !r.student_id && dirGuestMap[r.registration_id] === g.key),
-        ],
-      }))
+    // Excel sheet 名稱受限：≤31 字、不能含 : \ / ? * [ ]
+    const safeSheetName = name => String(name).replace(/[:\\/?*\[\]]/g, '').slice(0, 31)
 
-      const dirText = dir === 'up' ? '上山' : '下山'
-
-      // 大車
-      for (const car of dirCars) {
-        for (const regId of car.members) {
-          const r = regMap[regId]
-          if (!r) continue
-          const name     = getName(r)
-          const classes  = getClasses(r)
-          const cls      = classes.map(c => c.class_name).join('/')
-          const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
-          const identity = r.answers?.identity ?? ''
-          const note     = car.leaders.includes(regId) ? '領隊' : ''
-          rows.push([dirText, car.car_name, name, cls, grp, identity, note])
-        }
-        for (const monkId of (car.monks ?? [])) {
-          const monk = allMonks.find(m => m.id === monkId)
-          if (monk) rows.push([dirText, car.car_name, monk.name, '', '', '法師', '法師'])
-        }
-      }
-
-      // 小車
-      dirFinalSmall.forEach((g, idx) => {
-        for (const r of g.allMembers) {
-          const name     = getName(r)
-          const classes  = getClasses(r)
-          const cls      = classes.map(c => c.class_name).join('/')
-          const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
-          const identity = r.answers?.identity ?? ''
-          const isDriver = r.registration_id === g.key
-          const note     = isDriver ? `司機${g.plate ? `（${g.plate}）` : ''}` : '乘客'
-          rows.push([dirText, `小車 ${idx + 1}`, name, cls, grp, identity, note])
-        }
-      })
-
-      // 未指定小車的孤兒
-      const dirUnassignedOrphans = dirOrphans.filter(o => !dirOrphanMap[o.registration_id])
-      for (const r of dirUnassignedOrphans) {
-        const name     = getName(r)
-        const classes  = getClasses(r)
-        const cls      = classes.map(c => c.class_name).join('/')
-        const grp      = classes.map(c => c.group_name).filter(Boolean).join('/')
-        const identity = r.answers?.identity ?? ''
-        const carpoolNm = r.answers?.[fieldKeysFor(dir).carpool] ?? ''
-        rows.push([dirText, `小車（未指定）`, name, cls, grp, identity, carpoolNm ? `→ ${carpoolNm}` : ''])
-      }
+    // ── 排序工具 ──────────────────────────────────────
+    // 班級層級順序：日間 < 夜間；初級 < 中級 < 高級 < 研經 < 其他 < 空白
+    const classRank = name => {
+      if (!name) return [9, 9]   // 空白：放最後
+      const day = name.includes('日間') ? 0 : name.includes('夜間') ? 1 : 2
+      let lv = 5
+      if (name.includes('初級')) lv = 1
+      else if (name.includes('中級')) lv = 2
+      else if (name.includes('高級')) lv = 3
+      else if (name.includes('研經')) lv = 4
+      return [day, lv]
+    }
+    const sortByClassGroup = (a, b) => {
+      const ca = getClasses(a)[0] || {}
+      const cb = getClasses(b)[0] || {}
+      const [dA, lA] = classRank(ca.class_name)
+      const [dB, lB] = classRank(cb.class_name)
+      if (dA !== dB) return dA - dB
+      if (lA !== lB) return lA - lB
+      return (ca.group_name ?? '').localeCompare(cb.group_name ?? '', 'zh-TW')
     }
 
-    const csv  = '﻿' + rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-    const url  = URL.createObjectURL(blob)
-    const a    = document.createElement('a'); a.href = url
-    a.download = `${event?.name ?? '活動'}_分車名單.csv`
-    a.click(); URL.revokeObjectURL(url)
+    // 同車備註鏈式合併（Union-Find）：A 備註提到 B → A、B 排在一起；B 備註提到 C → 三人一組
+    // 排序前先依 sortByClassGroup 排好，再用 Union-Find 把同群組的人聚到一起
+    // 簇與簇之間維持原順序（簇的代表 = 第一個成員的位置）
+    function clusterByMentions(arr) {
+      if (arr.length < 2) return arr
+      const parent = arr.map((_, i) => i)
+      const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]))
+      const union = (i, j) => { const ri = find(i), rj = find(j); if (ri !== rj) parent[ri] = rj }
+
+      for (let i = 0; i < arr.length; i++) {
+        const note = getGuestNote(arr[i])
+        if (!note.trim()) continue
+        for (let j = 0; j < arr.length; j++) {
+          if (i === j) continue
+          const nm = getName(arr[j])
+          if (nm && nm.length >= 2 && note.includes(nm)) union(i, j)
+        }
+      }
+
+      const seen = new Array(arr.length).fill(false)
+      const result = []
+      for (let i = 0; i < arr.length; i++) {
+        if (seen[i]) continue
+        const root = find(i)
+        for (let j = i; j < arr.length; j++) {
+          if (!seen[j] && find(j) === root) {
+            result.push(arr[j])
+            seen[j] = true
+          }
+        }
+      }
+      return result
+    }
+
+    // 取得某 host 學員所對應的訪客（host_student_id 直接配對，或備註姓名比對相容舊資料）
+    const guestsOfHost = (host, pool) => {
+      if (!host?.student_id) return []
+      const hostName = getName(host)
+      return pool.filter(g => {
+        if (g.host_student_id && g.host_student_id === host.student_id) return true
+        const note = getGuestNote(g)
+        if (note && hostName.length >= 2 && note.includes(hostName)) return true
+        return false
+      })
+    }
+
+    // ── 大車 sheet：合併 up + down（依 car_name）───────
+    function buildLargeCarSheet(carName, upCar, downCar) {
+      const upMembers   = new Set(upCar?.members ?? [])
+      const downMembers = new Set(downCar?.members ?? [])
+      const upLeaders   = new Set(upCar?.leaders ?? [])
+      const downLeaders = new Set(downCar?.leaders ?? [])
+      const upMonkIds   = new Set(upCar?.monks ?? [])
+      const downMonkIds = new Set(downCar?.monks ?? [])
+      const leaderAny   = new Set([...upLeaders, ...downLeaders])
+
+      // 聯集所有 member regId
+      const allIds  = [...new Set([...upMembers, ...downMembers])]
+      const allRegs = allIds.map(id => regMap[id]).filter(Boolean)
+
+      // 分組：領隊 / 一般學員 / 訪客
+      // 領隊保持 car.leaders 的儲存順序（手動選定，照班級排會打亂師父的安排）
+      const leaderOrder = [
+        ...(upCar?.leaders ?? []),
+        ...(downCar?.leaders ?? []).filter(id => !(upCar?.leaders ?? []).includes(id)),
+      ]
+      const leaderRegs    = leaderOrder.map(id => regMap[id]).filter(Boolean)
+      const otherStudents = allRegs.filter(r => r.student_id && !leaderAny.has(r.registration_id))
+      const guestPool     = allRegs.filter(r => !r.student_id && !leaderAny.has(r.registration_id))
+
+      // 領隊不重排（保留儲存順序）；其他學員照班級組別 + 同車備註聚簇
+      const sortedLeaders  = clusterByMentions(leaderRegs)
+      const sortedStudents = clusterByMentions([...otherStudents].sort(sortByClassGroup))
+
+      // 訪客緊跟 host
+      const finalRegs = []
+      let remaining = [...guestPool]
+      const flush = host => {
+        const attached = guestsOfHost(host, remaining)
+        finalRegs.push(...attached)
+        remaining = remaining.filter(g => !attached.includes(g))
+      }
+      for (const r of sortedLeaders)  { finalRegs.push(r); flush(r) }
+      for (const r of sortedStudents) { finalRegs.push(r); flush(r) }
+      finalRegs.push(...remaining)  // 找不到 host 的訪客
+
+      // 組 rows
+      const headers = ['序號', '車次', '姓名', '班級', '組別', '身份別', '電話', '上山', '下山', '備註']
+      const data = []
+      let seq = 1
+
+      // 法師（聯集 up/down monks）排最前
+      const allMonkIds = [...new Set([...upMonkIds, ...downMonkIds])]
+      for (const mid of allMonkIds) {
+        const monk = allMonks.find(m => m.id === mid)
+        if (!monk) continue
+        const up   = upMonkIds.has(mid)   ? 'V' : ''
+        const down = downMonkIds.has(mid) ? 'V' : ''
+        data.push([seq++, carName, monk.name, '', '', '法師', '', up, down, '法師'])
+      }
+
+      // 學員 / 訪客
+      for (const r of finalRegs) {
+        const isLeader = leaderAny.has(r.registration_id)
+        const up   = upMembers.has(r.registration_id)   ? 'V' : ''
+        const down = downMembers.has(r.registration_id) ? 'V' : ''
+        const origNote = getGuestNote(r)
+        const parts = []
+        if (isLeader) parts.push('領隊')
+        if (origNote) parts.push(origNote)
+        data.push([seq++, carName, getName(r), clsOf(r), grpOf(r), idOf(r), '', up, down, parts.join('/')])
+      }
+
+      return XLSX.utils.aoa_to_sheet([headers, ...data])
+    }
+
+    // ── 小車 sheet：依主司機（anchor regId）合併 up + down ──
+    function buildSmallCarSheet() {
+      const upSmallRegs   = regs.filter(r => isSmallCar(r.answers, 'up'))
+      const downSmallRegs = regs.filter(r => isSmallCar(r.answers, 'down'))
+      const upRes   = computeSmallGroups(upSmallRegs,   'up')
+      const downRes = computeSmallGroups(downSmallRegs, 'down')
+
+      // 依 anchor (g.key) 合併兩方向群組
+      const byDriver = new Map()
+      const touch   = (key, plate) => {
+        if (!byDriver.has(key)) byDriver.set(key, { plate: '', up: null, down: null })
+        if (plate && !byDriver.get(key).plate) byDriver.get(key).plate = plate
+      }
+      for (const g of upRes.matchedGroups)   { touch(g.key, g.plate); byDriver.get(g.key).up   = g }
+      for (const g of downRes.matchedGroups) { touch(g.key, g.plate); byDriver.get(g.key).down = g }
+
+      const upOM   = orphanByDir.up
+      const downOM = orphanByDir.down
+      const upGM   = guestSmallByDir.up
+      const downGM = guestSmallByDir.down
+
+      const headers = ['序號', '車次', '車號', '姓名', '班級', '組別', '身份別', '電話', '上山', '下山', '備註']
+      const data = []
+      let seq = 1
+      let carIdx = 1
+
+      for (const [driverKey, { plate, up, down }] of byDriver) {
+        const carName = `小車${carIdx++}`
+
+        // 聯集成員（含 anchor、其他同車號 candidate、共乘者、手動指派的孤兒、從大車搬過來的訪客）
+        const upMemberIds = new Set()
+        const downMemberIds = new Set()
+        if (up)   up.members.forEach(r   => upMemberIds.add(r.registration_id))
+        if (down) down.members.forEach(r => downMemberIds.add(r.registration_id))
+        upRes.orphans.filter(o => upOM[o.registration_id] === driverKey)
+          .forEach(o => upMemberIds.add(o.registration_id))
+        downRes.orphans.filter(o => downOM[o.registration_id] === driverKey)
+          .forEach(o => downMemberIds.add(o.registration_id))
+        regs.filter(r => !r.student_id && upGM[r.registration_id] === driverKey)
+          .forEach(r => upMemberIds.add(r.registration_id))
+        regs.filter(r => !r.student_id && downGM[r.registration_id] === driverKey)
+          .forEach(r => downMemberIds.add(r.registration_id))
+
+        const allIds  = [...new Set([...upMemberIds, ...downMemberIds])]
+        const allRegs = allIds.map(id => regMap[id]).filter(Boolean)
+
+        // 排序：主司機在最前，其餘依班組排序
+        const driverReg  = allRegs.find(r => r.registration_id === driverKey)
+        const others     = allRegs.filter(r => r.registration_id !== driverKey)
+        const sortedOthers = [...others].sort(sortByClassGroup)
+
+        const ordered = []
+        if (driverReg) ordered.push(driverReg)
+        ordered.push(...sortedOthers)
+
+        for (const r of ordered) {
+          const isDriver = r.registration_id === driverKey
+          const up_   = upMemberIds.has(r.registration_id)   ? 'V' : ''
+          const down_ = downMemberIds.has(r.registration_id) ? 'V' : ''
+          const origNote = getGuestNote(r)
+          const parts = []
+          if (isDriver) parts.push('司機')
+          if (origNote) parts.push(origNote)
+          data.push([seq++, carName, plate || '', getName(r), clsOf(r), grpOf(r), idOf(r), '', up_, down_, parts.join('/')])
+        }
+      }
+
+      // 未指派的孤兒（沒被指到任何小車的乘客）
+      const upUnassigned   = upRes.orphans.filter(o => !upOM[o.registration_id])
+      const downUnassigned = downRes.orphans.filter(o => !downOM[o.registration_id])
+      const unassignedIds  = [...new Set([
+        ...upUnassigned.map(o => o.registration_id),
+        ...downUnassigned.map(o => o.registration_id),
+      ])]
+      for (const id of unassignedIds) {
+        const r = regMap[id]
+        if (!r) continue
+        const upV   = upUnassigned.some(o => o.registration_id === id)   ? 'V' : ''
+        const downV = downUnassigned.some(o => o.registration_id === id) ? 'V' : ''
+        const origNote   = getGuestNote(r)
+        const carpoolUp   = r.answers?.[fieldKeysFor('up').carpool]   ?? ''
+        const carpoolDown = r.answers?.[fieldKeysFor('down').carpool] ?? ''
+        const carpool = carpoolUp || carpoolDown
+        const parts = []
+        if (carpool) parts.push(`→ ${carpool}`)
+        if (origNote) parts.push(origNote)
+        data.push([seq++, '小車（未指定）', '', getName(r), clsOf(r), grpOf(r), idOf(r), '', upV, downV, parts.join('/')])
+      }
+
+      return data.length > 0 ? XLSX.utils.aoa_to_sheet([headers, ...data]) : null
+    }
+
+    // ── 主流程：建 workbook，每大車一個 sheet + 小車一個 sheet ──
+    const wb = XLSX.utils.book_new()
+
+    // 大車：依 car_name 合併 up/down；保留 up 順序在前，down 獨有的補在後
+    const orderedNames = []
+    const seenNames = new Set()
+    for (const c of carsByDir.up) {
+      if (!seenNames.has(c.car_name)) { orderedNames.push(c.car_name); seenNames.add(c.car_name) }
+    }
+    for (const c of carsByDir.down) {
+      if (!seenNames.has(c.car_name)) { orderedNames.push(c.car_name); seenNames.add(c.car_name) }
+    }
+
+    for (const carName of orderedNames) {
+      const upCar   = carsByDir.up.find(c   => c.car_name === carName)
+      const downCar = carsByDir.down.find(c => c.car_name === carName)
+      const ws = buildLargeCarSheet(carName, upCar, downCar)
+      if (ws) XLSX.utils.book_append_sheet(wb, ws, safeSheetName(carName))
+    }
+
+    // 小車
+    const smallWs = buildSmallCarSheet()
+    if (smallWs) XLSX.utils.book_append_sheet(wb, smallWs, '小車')
+
+    if (wb.SheetNames.length === 0) {
+      alert('沒有任何車輛可匯出')
+      return
+    }
+
+    XLSX.writeFile(wb, `${event?.name ?? '活動'}_分車名單.xlsx`)
   }
 
   // ── 渲染 ──
